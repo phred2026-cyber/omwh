@@ -9,17 +9,32 @@ Built by **[PyreHaven](https://pyrehaven.xyz)** and used on the [PyreHaven Minec
 
 ---
 
+## Commands
+
+### `/home`
+Teleports you to your **respawn point** — your bed or respawn anchor, wherever it was last set. Works within the same dimension only (no cross-dimension teleport).
+
+### `/spawn`
+Teleports you to the **spawn point of your current dimension**:
+- **Overworld** → world spawn
+- **Nether** → Nether spawn
+- **End** → the obsidian platform
+
+Neither command crosses dimensions — you teleport to the spawn or home of whichever dimension you are already in.
+
+### Mounts & Passengers
+If you are riding a mount (horse, boat, pig, strider, etc.), it comes with you. Any **passengers or entities inside your vehicle** — including other players — also teleport along.
+
+---
+
 ## Features
 
-- `/home` — teleport to your bed/anchor spawn point (same dimension only)
-- `/spawn` — teleport to world spawn
-- **PvP cooldown** — blocks teleport after combat (default: 45s)
-- **Damage cooldown** — blocks after taking damage (default: 10s)
-- **Join cooldown** — blocks right after joining (default: 30s)
-- **Regular cooldown** — between teleports (default: 30s)
+- **Configurable cooldowns** — regular, PvP, damage taken, and join cooldowns
+- **Configurable aliases** (e.g. `/h`, `/s`)
+- **Custom messages** with `{time}` placeholder support
+- **Teleport effects** — optional sound and particles on arrival
+- **Safe teleport** — won't drop you into the void
 - Works **singleplayer** or **server-side only** (clients don't need the mod)
-- Vehicle/mount support — teleports with your ride
-- Safe teleport — won't drop you into the void
 - Fully configurable via `config/omwh.json`
 
 ---
