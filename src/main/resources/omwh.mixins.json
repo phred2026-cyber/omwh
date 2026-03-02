@@ -1,0 +1,13 @@
+{
+    "required": true,
+    "minVersion": "0.8",
+    "package": "com.omwh.mixin",
+    "compatibilityLevel": "JAVA_21",
+    "refmap": "omwh.refmap.json",
+    "mixins": [
+    ],
+    "injectors": {
+        "defaultRequire": 1
+    },
+    "priority": 1000
+}

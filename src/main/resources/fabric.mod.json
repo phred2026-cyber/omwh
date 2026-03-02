@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "id": "omwh",
+  "version": "${version}",
+  "name": "OMWH (Java)",
+  "description": "Adds /home and /spawn commands with configurable cooldowns, aliases, and messages. Works singleplayer or server-side only.",
+  "authors": [
+    "PyreHaven"
+  ],
+  "contact": {
+    "homepage": "https://pyrehaven.xyz",
+    "sources": "https://github.com/phred2026-cyber/omwh",
+    "issues": "https://github.com/phred2026-cyber/omwh/issues"
+  },
+  "icon": "assets/omwh/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.omwh.OMWH"
+    ]
+  },
+  "mixins": [
+    "omwh.mixins.json"
+  ],
+  "accessWidener": "omwh.accesswidener",
+  "depends": {
+    "fabricloader": ">=0.16.13",
+    "minecraft": ">=1.21.11",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}

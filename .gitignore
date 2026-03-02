@@ -1,0 +1,40 @@
+# Build output
+build/
+out/
+
+# Gradle
+.gradle/
+!gradle/wrapper/gradle-wrapper.jar
+!gradle/wrapper/gradle-wrapper.properties
+
+# Run directory (Fabric dev env)
+run/
+
+# Compiled class files
+*.class
+
+# JAR files (except gradle wrapper)
+*.jar
+!gradle/wrapper/gradle-wrapper.jar
+
+# IDE files
+.idea/
+*.iml
+*.iws
+*.ipr
+.vscode/
+*.eclipse
+.classpath
+.project
+.settings/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Node (just in case)
+node_modules/
+npm-debug.log*
+
+# Logs
+*.log
