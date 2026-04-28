@@ -1,23 +1,24 @@
 package com.omwh.utils;
 
-import net.minecraft.server.network.ServerPlayerEntity;
-import net.minecraft.server.world.ServerWorld;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.server.level.ServerLevel;
 
 public class WorldCompat {
-    public static ServerWorld getWorld(ServerPlayerEntity player) {
-        try {
-            return (ServerWorld) player.getEntityWorld();
-        } catch (Throwable t) {
-            return null;
-        }
-    }
+  public static ServerLevel getLevel(ServerPlayer player) {
+      try {
+          return (ServerLevel) player.level();
+      } catch (Throwable t) {
+          return null;
+      }
+  }
 
-    public static ServerWorld getWorld(Object entity) {
-        try {
-            if (entity instanceof net.minecraft.entity.Entity) {
-                return (ServerWorld) ((net.minecraft.entity.Entity) entity).getEntityWorld();
-            }
-        } catch (Throwable ignored) {}
-        return null;
-    }
+  public static ServerLevel getLevel(Object entity) {
+      try {
+          if (entity instanceof net.minecraft.world.entity.Entity) {
+              return (ServerLevel) ((net.minecraft.world.entity.Entity) entity).level();
+          }
+      } catch (Throwable ignored) {}
+      return null;
+  }
 }
+

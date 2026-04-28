@@ -42,9 +42,13 @@ sourceSets {
 
 dependencies {
 	minecraft "com.mojang:minecraft:${project.minecraft_version}"
-	mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+	mappings files("gradle/minecraft/identity-official-26.1.2.jar")
 	modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
-	modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+	modImplementation "net.fabricmc.fabric-api:fabric-command-api-v2:3.0.5+e2bdee784c"
+	modImplementation "net.fabricmc.fabric-api:fabric-entity-events-v1:5.0.2+e2bdee784c"
+	modImplementation "net.fabricmc.fabric-api:fabric-lifecycle-events-v1:4.1.0+6d50a0854c"
+	modImplementation "net.fabricmc.fabric-api:fabric-networking-api-v1:6.3.0+50a808ce4c"
+	modImplementation "net.fabricmc.fabric-api:fabric-api-base:2.0.3+ece063234c"
 }
 
 processResources {
