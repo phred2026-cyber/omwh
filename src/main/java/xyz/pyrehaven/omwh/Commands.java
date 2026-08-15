@@ -1,6 +1,7 @@
 package xyz.pyrehaven.omwh;
 
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.builder.LiteralArgumentBuilder;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.network.chat.Component;
 import net.minecraft.core.particles.ParticleTypes;
@@ -26,12 +27,20 @@ public final class Commands {
     }
 
     void register(CommandDispatcher<CommandSourceStack> dispatcher) {
-        dispatcher.register(net.minecraft.commands.Commands.literal(config.homeCommand)
+        LiteralArgumentBuilder<CommandSourceStack> home = net.minecraft.commands.Commands.literal(config.homeCommand)
                 .requires(source -> source.getEntity() instanceof ServerPlayer)
-                .executes(context -> executeHome(context.getSource().getPlayer())));
-        dispatcher.register(net.minecraft.commands.Commands.literal(config.spawnCommand)
+                .executes(context -> executeHome(context.getSource().getPlayer(), false));
+        LiteralArgumentBuilder<CommandSourceStack> spawn = net.minecraft.commands.Commands.literal(config.spawnCommand)
                 .requires(source -> source.getEntity() instanceof ServerPlayer)
-                .executes(context -> executeSpawn(context.getSource().getPlayer())));
+                .executes(context -> executeSpawn(context.getSource().getPlayer(), false));
+        if (config.enableForceOverride) {
+            home.then(net.minecraft.commands.Commands.literal("--force")
+                    .executes(context -> executeHome(context.getSource().getPlayer(), true)));
+            spawn.then(net.minecraft.commands.Commands.literal("--force")
+                    .executes(context -> executeSpawn(context.getSource().getPlayer(), true)));
+        }
+        dispatcher.register(home);
+        dispatcher.register(spawn);
     }
 
     static String cooldownMessage(OmwhConfig config, Cooldowns.Blocking blocking) {
@@ -50,11 +59,11 @@ public final class Commands {
                 + (home ? "their home" : "spawn") + ".";
     }
 
-    private int executeHome(ServerPlayer player) {
+    private int executeHome(ServerPlayer player, boolean force) {
         if (player == null) return 0;
         try {
             if (!admit(player)) return 0;
-            HomeDestination.Result destination = HomeDestination.find(player);
+            HomeDestination.Result destination = HomeDestination.find(player, force);
             switch (destination.outcome()) {
                 case NO_HOME -> send(player, config.noHomepointMessage);
                 case CROSS_DIMENSION -> send(player, config.crossDimensionMessage);
@@ -69,7 +78,7 @@ public final class Commands {
         return 0;
     }
 
-    private int executeSpawn(ServerPlayer player) {
+    private int executeSpawn(ServerPlayer player, boolean force) {
         if (player == null) return 0;
         try {
             if (!admit(player)) return 0;
@@ -77,7 +86,7 @@ public final class Commands {
                 send(player, "§cCannot determine your current world.");
                 return 0;
             }
-            SpawnDestination.Result destination = SpawnDestination.find(player, level);
+            SpawnDestination.Result destination = SpawnDestination.find(player, level, force);
             switch (destination.outcome()) {
                 case NO_WORLD_SPAWN -> send(player, "§cCannot determine world spawn.");
                 case VEHICLE_TOO_LARGE -> send(player, VEHICLE_TOO_LARGE);

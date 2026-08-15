@@ -26,7 +26,7 @@ public final class OmwhConfig {
     };
     private static final String[] BOOLEAN_FIELDS = {
             "enableRegularCooldown", "enablePvpCooldown", "enableDamageCooldown",
-            "playTeleportSound", "spawnTeleportParticles"
+            "playTeleportSound", "spawnTeleportParticles", "enableForceOverride"
     };
     private static final String[] INTEGER_FIELDS = {
             "regularCooldownSeconds", "pvpCooldownSeconds", "damageCooldownSeconds", "joinCooldownSeconds"
@@ -43,12 +43,13 @@ public final class OmwhConfig {
     public int joinCooldownSeconds = 30;
     public boolean playTeleportSound = true;
     public boolean spawnTeleportParticles = true;
+    public boolean enableForceOverride = true;
     public String homeSuccessMessage = "§aTeleported to your home!";
     public String spawnSuccessMessage = "§aTeleported to world spawn!";
     public String noHomepointMessage = "§cYou don't have a spawn point set!";
     public String crossDimensionMessage = "§cYou are not powerful enough to bend space between dimensions. Use a portal first, then try again!";
-    public String unsafeHomeMessage = "§cThere is no safe spot at your home to bring you to.";
-    public String unsafeSpawnMessage = "§cCannot find a safe spawn location - please contact an administrator!";
+    public String unsafeHomeMessage = "§cIt is not safe to teleport here.";
+    public String unsafeSpawnMessage = "§cIt is not safe to teleport here.";
     public String pvpCooldownMessage = "§cYou were recently in combat! Please wait {time} seconds before teleporting.";
     public String damageCooldownMessage = "§cYou recently took damage! Please wait {time} seconds before teleporting.";
     public String joinCooldownMessage = "§cYou must wait {time} seconds after joining before teleporting!";

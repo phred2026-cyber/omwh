@@ -11,6 +11,7 @@ import net.minecraft.world.phys.Vec3;
 public final class HomeDestination {
     enum Decision { ACCEPT, NO_HOME, CROSS_DIMENSION }
     enum Outcome { ACCEPT, NO_HOME, CROSS_DIMENSION, VEHICLE_TOO_LARGE, UNSAFE }
+    enum MountedChoice { EXACT, ABOVE_BED, VEHICLE_TOO_LARGE, UNSAFE }
     record Result(Outcome outcome, DestinationSafety.Prepared destination) { }
 
     private HomeDestination() { }
@@ -25,7 +26,21 @@ public final class HomeDestination {
         return mounted && bed && !forced && !covered;
     }
 
-    static Result find(ServerPlayer player) {
+    static boolean mayUseRespawn(boolean safe, boolean force) {
+        return safe || force;
+    }
+
+    static MountedChoice chooseMounted(DestinationSafety.HomeFit exact, boolean mayTryFallback,
+                                       DestinationSafety.HomeFit fallback) {
+        if (exact == DestinationSafety.HomeFit.FITS) return MountedChoice.EXACT;
+        if (exact == DestinationSafety.HomeFit.UNSAFE) return MountedChoice.UNSAFE;
+        if (!mayTryFallback) return MountedChoice.VEHICLE_TOO_LARGE;
+        if (fallback == DestinationSafety.HomeFit.FITS) return MountedChoice.ABOVE_BED;
+        if (fallback == DestinationSafety.HomeFit.UNSAFE) return MountedChoice.UNSAFE;
+        return MountedChoice.VEHICLE_TOO_LARGE;
+    }
+
+    static Result find(ServerPlayer player, boolean force) {
         var respawnConfig = player.getRespawnConfig();
         if (respawnConfig == null) return new Result(Outcome.NO_HOME, null);
 
@@ -40,27 +55,38 @@ public final class HomeDestination {
 
         Entity root = player.getRootVehicle();
         if (root == player) {
+            if (!mayUseRespawn(DestinationSafety.unmountedHomeFits(
+                    player, respawn.newLevel(), respawn.position()), force)) {
+                return new Result(Outcome.UNSAFE, null);
+            }
             return new Result(Outcome.ACCEPT, new DestinationSafety.Prepared(respawn.newLevel(),
                     respawn.position(), respawn.yRot(), respawn.xRot()));
         }
 
-        BlockPos homeBlock = respawnConfig.respawnData().pos();
-        if (DestinationSafety.mountedHomeFits(root, respawn.newLevel(), respawn.position(), homeBlock)) {
+        if (force) {
             return new Result(Outcome.ACCEPT, new DestinationSafety.Prepared(respawn.newLevel(),
                     respawn.position(), root.getYRot(), root.getXRot()));
         }
 
+        BlockPos homeBlock = respawnConfig.respawnData().pos();
+        DestinationSafety.HomeFit exactFit = DestinationSafety.mountedHomeFit(
+                root, respawn.newLevel(), respawn.position(), homeBlock);
         boolean bed = respawn.newLevel().getBlockState(homeBlock).getBlock() instanceof BedBlock;
         boolean covered = bed && isCoveredBed(respawn.newLevel(), homeBlock);
-        if (mayTryAboveBed(true, bed, respawnConfig.forced(), covered)) {
-            Vec3 aboveBed = new Vec3(homeBlock.getX() + 0.5, homeBlock.getY() + 1.0,
-                    homeBlock.getZ() + 0.5);
-            if (DestinationSafety.mountedHomeFits(root, respawn.newLevel(), aboveBed, homeBlock)) {
-                return new Result(Outcome.ACCEPT, new DestinationSafety.Prepared(respawn.newLevel(),
-                        aboveBed, root.getYRot(), root.getXRot()));
-            }
+        boolean mayTryFallback = mayTryAboveBed(true, bed, respawnConfig.forced(), covered);
+        Vec3 aboveBed = new Vec3(homeBlock.getX() + 0.5, homeBlock.getY() + 1.0,
+                homeBlock.getZ() + 0.5);
+        DestinationSafety.HomeFit fallbackFit = mayTryFallback
+                ? DestinationSafety.mountedHomeFit(root, respawn.newLevel(), aboveBed, homeBlock)
+                : DestinationSafety.HomeFit.BLOCKED;
+        MountedChoice choice = chooseMounted(exactFit, mayTryFallback, fallbackFit);
+        if (choice == MountedChoice.UNSAFE) return new Result(Outcome.UNSAFE, null);
+        if (choice == MountedChoice.VEHICLE_TOO_LARGE) {
+            return new Result(Outcome.VEHICLE_TOO_LARGE, null);
         }
-        return new Result(Outcome.VEHICLE_TOO_LARGE, null);
+        Vec3 position = choice == MountedChoice.ABOVE_BED ? aboveBed : respawn.position();
+        return new Result(Outcome.ACCEPT, new DestinationSafety.Prepared(respawn.newLevel(),
+                position, root.getYRot(), root.getXRot()));
     }
 
     private static boolean isCoveredBed(ServerLevel level, BlockPos homeBlock) {

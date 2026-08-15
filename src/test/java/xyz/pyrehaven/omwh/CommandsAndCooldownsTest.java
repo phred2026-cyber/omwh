@@ -1,5 +1,10 @@
 package xyz.pyrehaven.omwh;
 
+import com.mojang.brigadier.CommandDispatcher;
+import net.minecraft.SharedConstants;
+import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.server.Bootstrap;
+
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
@@ -8,9 +13,31 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class CommandsAndCooldownsTest {
     public static void main(String[] args) {
         cooldownPolicyUsesUuidExpiryAndPriority();
+        forceSyntaxFollowsTheServerSetting();
         commandFeedbackUsesSpecificMessagesColorsAndPassengerDestination();
         acceptedCommandOperationsRunInReleasedOrder();
-        System.out.println("CommandsAndCooldownsTest PASS (3 behavior groups)");
+        System.out.println("CommandsAndCooldownsTest PASS (4 behavior groups)");
+    }
+
+    private static void forceSyntaxFollowsTheServerSetting() {
+        SharedConstants.tryDetectVersion();
+        Bootstrap.bootStrap();
+        OmwhConfig enabled = new OmwhConfig();
+        CommandDispatcher<CommandSourceStack> enabledDispatcher = new CommandDispatcher<>();
+        new Commands(enabled, new Cooldowns(enabled, () -> 0L)).register(enabledDispatcher);
+        check(enabledDispatcher.getRoot().getChild("home").getChild("--force") != null,
+                "/home --force registered by default");
+        check(enabledDispatcher.getRoot().getChild("spawn").getChild("--force") != null,
+                "/spawn --force registered by default");
+
+        OmwhConfig disabled = new OmwhConfig();
+        disabled.enableForceOverride = false;
+        CommandDispatcher<CommandSourceStack> disabledDispatcher = new CommandDispatcher<>();
+        new Commands(disabled, new Cooldowns(disabled, () -> 0L)).register(disabledDispatcher);
+        check(disabledDispatcher.getRoot().getChild("home").getChild("--force") == null,
+                "disabled /home force syntax absent");
+        check(disabledDispatcher.getRoot().getChild("spawn").getChild("--force") == null,
+                "disabled /spawn force syntax absent");
     }
 
     private static void cooldownPolicyUsesUuidExpiryAndPriority() {

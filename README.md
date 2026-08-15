@@ -6,6 +6,9 @@ OMWH adds `/home` and `/spawn` to Fabric servers without turning them into cross
 
 - `/home` returns you to a valid bed or respawn anchor in your current dimension.
 - `/spawn` finds safe ground near the current dimension's spawn.
+- `/home --force` and `/spawn --force` deliberately use each command's raw destination when you
+  accept the risk. They still enforce player-only use, cooldowns, and each command's applicable home
+  and dimension rules.
 - Mounts, vehicles, and their passengers travel with you when there is room.
 - Server owners can configure cooldowns, command names, messages, sounds, and particles.
 - Players do not need to install OMWH on their clients.
@@ -14,9 +17,15 @@ Built by [PyreHaven](https://pyrehaven.xyz).
 
 ## Teleport rules
 
-`/home` uses Minecraft's normal placement around your respawn point. If you are mounted and the vehicle cannot fit beside an uncovered bed, OMWH may place the group directly above it. Invalid, blocked, or cross-dimension homes are refused.
+`/home` uses Minecraft's normal placement around your respawn point, then refuses fluids and unsafe
+hazards such as lava at that position. If you are mounted and the vehicle cannot fit beside an
+uncovered bed, OMWH may place the group directly above it. Invalid, blocked, unsafe, or
+cross-dimension homes are refused.
 
 `/spawn` searches near the spawn point for solid ground with enough clear space for the player or vehicle. In the End, it recreates Minecraft 26.2's built-in obsidian arrival platform and uses the vanilla feet position and orientation instead of searching.
+
+The literal `--force` form skips only destination-safety checks and teleports to the command's raw
+destination. Server owners can remove both force forms by setting `enableForceOverride` to `false`.
 
 ## Installation
 
@@ -44,11 +53,15 @@ Edit `config/omwh.json` after the first launch.
 | `joinCooldownSeconds` | `30` | Cooldown after joining |
 | `playTeleportSound` | `true` | Play a sound after destination acceptance, before mutation |
 | `spawnTeleportParticles` | `true` | Show particles after destination acceptance, before mutation |
+| `enableForceOverride` | `true` | Register `/home --force` and `/spawn --force` |
 | Message fields | See config | Text shown to players; supports Minecraft color codes and `{time}` |
 
 Set a cooldown to `0` to disable it. Damage cooldowns begin in Fabric's `ALLOW_DAMAGE` callback when OMWH allows the incoming event to continue. That callback runs before mitigation; another listener may later cancel the event, and OMWH does not claim the damage was finally applied.
 
 Omitted fields keep their defaults and unknown fields are ignored. Known fields must use the documented JSON type; for example, `30` and `true` are valid, while `"30"` and `"true"` are rejected rather than coerced.
+
+Both `unsafeHomeMessage` and `unsafeSpawnMessage` default to
+`§cIt is not safe to teleport here.`.
 
 ## Links
 

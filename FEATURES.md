@@ -14,11 +14,16 @@ This file is the accepted gameplay contract for the in-development OMWH rewrite.
 ## `/home`
 
 - The configured home command defaults to `/home`.
+- `/home --force` uses the same authoritative vanilla respawn position while deliberately bypassing
+  destination-safety checks. It remains subject to player-source, cooldown, missing-home, and
+  same-dimension rules, and exists only while `enableForceOverride` is enabled.
 - A home exists only when Minecraft has a valid configured respawn point for the player: a bed, a charged respawn anchor, or a forced respawn point.
 - OMWH asks Minecraft for its normal respawn placement without consuming a respawn-anchor charge.
 - A missing or destroyed respawn point is not replaced with world spawn.
 - A respawn transition into another dimension is refused. The player must enter that dimension normally before using the command.
-- Unmounted players use Minecraft's accepted respawn position.
+- Unmounted players use Minecraft's accepted respawn position only when its occupied space and
+  supporting layer contain no fluid or configured hazard such as lava, fire, magma, cactus, sweet
+  berry bush, wither rose, or powder snow.
 - Mounted use first requires the root vehicle to fit at that position. The two blocks of the configured bed may be exempted from the extra mounted-clearance margin, but no unrelated collision is exempt.
 - If that exact position cannot hold a mounted group, one alternate is permitted only for an uncovered, non-forced bed: the position centered one block above the configured bed. There is no wider, random, vertical, or compatibility search.
 - A blocked home, unsafe destination, or vehicle that cannot fit is denied before mutation and leaves every entity where it was. A failure after recursive teleport begins has no rollback guarantee.
@@ -26,6 +31,10 @@ This file is the accepted gameplay contract for the in-development OMWH rewrite.
 ## `/spawn`
 
 - The configured spawn command defaults to `/spawn`.
+- `/spawn --force` teleports to the current dimension's raw spawn block-center feet position without
+  running the ordinary safe-location search. In the End it uses the built-in End arrival position and
+  platform behavior. It remains subject to player-source and cooldown rules, and exists only while
+  `enableForceOverride` is enabled.
 - The command uses the spawn belonging to the player's current dimension; it does not route every player to the Overworld.
 - In the End, OMWH recreates Minecraft 26.2's obsidian arrival platform at the built-in End spawn point and places the group at the platform feet position with vanilla's west-facing orientation. It does not run the ordinary spawn search there.
 - Outside the End-specific rule, OMWH searches deterministically near the current world's spawn for the nearest accepted feet position. The search is bounded to a horizontal radius of 64 blocks and vertical offsets from 2 blocks below through 10 blocks above spawn. If reading the world's spawn throws, the released locator uses `(0, 64, 0)` as its fallback search center.
@@ -34,10 +43,13 @@ This file is the accepted gameplay contract for the in-development OMWH rewrite.
 
 ## Shared destination safety
 
-`DestinationSafety` owns the safety primitives used by both destination policies. The commands do not apply identical checks because Minecraft already validates an unmounted `/home` respawn position.
+`DestinationSafety` owns the safety primitives used by both destination policies. Normal command
+forms apply their destination policies; the literal `--force` forms deliberately skip those safety
+checks and no other admission rule.
 
-- Unmounted `/home` accepts Minecraft's validated same-dimension respawn position.
-- Mounted `/home` checks the translated root-vehicle bounds, the required horizontal and upper clearance margins, block collision, the configured-bed exemption, and the world border. Passenger hitboxes do not enlarge this clearance volume.
+- Unmounted `/home` additionally rejects fluids and hazards in the translated player space or its
+  supporting layer, even when Minecraft supplied the respawn position.
+- Mounted `/home` checks the translated root-vehicle bounds, the required horizontal and upper clearance margins, block collision, fluids and hazards in the vehicle space or supporting layer, the configured-bed exemption, and the world border. Passenger hitboxes do not enlarge this clearance volume.
 - `/spawn` requires full-block support beneath the complete square root footprint and clear occupied blocks through the required root height.
 - `/spawn` rejects fluids and hazardous blocks, including fire, lava, magma, cactus, sweet berry bushes, wither roses, and powder snow.
 - After selecting a `/spawn` destination, OMWH loads the fixed five-by-five chunk area around it before teleport mutation.
@@ -96,12 +108,13 @@ Cooldown state is keyed by player UUID and owned only by `Cooldowns`.
 | `joinCooldownSeconds` | `30` | Join cooldown duration; `0` disables it |
 | `playTeleportSound` | `true` | Enables the pre-mutation teleport-attempt sound |
 | `spawnTeleportParticles` | `true` | Enables pre-mutation teleport-attempt particles |
+| `enableForceOverride` | `true` | Registers the literal `--force` form for both commands |
 | `homeSuccessMessage` | `"§aTeleported to your home!"` | `/home` success text |
 | `spawnSuccessMessage` | `"§aTeleported to world spawn!"` | `/spawn` success text |
 | `noHomepointMessage` | `"§cYou don't have a spawn point set!"` | Missing or invalid home text |
 | `crossDimensionMessage` | `"§cYou are not powerful enough to bend space between dimensions. Use a portal first, then try again!"` | Cross-dimension refusal text |
-| `unsafeHomeMessage` | `"§cThere is no safe spot at your home to bring you to."` | Unsafe-home text |
-| `unsafeSpawnMessage` | `"§cCannot find a safe spawn location - please contact an administrator!"` | Unsafe-spawn text |
+| `unsafeHomeMessage` | `"§cIt is not safe to teleport here."` | Unsafe-home text |
+| `unsafeSpawnMessage` | `"§cIt is not safe to teleport here."` | Unsafe-spawn text |
 | `pvpCooldownMessage` | `"§cYou were recently in combat! Please wait {time} seconds before teleporting."` | PvP block text |
 | `damageCooldownMessage` | `"§cYou recently took damage! Please wait {time} seconds before teleporting."` | Damage block text |
 | `joinCooldownMessage` | `"§cYou must wait {time} seconds after joining before teleporting!"` | Join block text |
@@ -112,6 +125,8 @@ The configuration path is not strict whole-document schema validation: unknown k
 ## Failure contract
 
 - Expected denials use the most specific player-facing message and return command failure without teleport mutation.
+- Force bypasses destination safety only. It does not bypass command-source, cooldown, missing-home,
+  cross-dimension, destination-world, or teleport-mutation failure handling.
 - Destination discovery and the checks required by that command complete before teleport mutation begins.
 - No command catches an invariant violation and retries through another destination or mutation path.
 - Unexpected command exceptions are logged with context, send the command user an internal-error message, and return command failure.

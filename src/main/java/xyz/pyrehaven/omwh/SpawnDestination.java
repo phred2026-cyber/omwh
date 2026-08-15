@@ -49,6 +49,8 @@ public final class SpawnDestination {
 
     static Center fallbackCenter() { return new Center(0, 64, 0); }
 
+    static Vec3 rawPosition(BlockPos spawn) { return Vec3.atBottomCenterOf(spawn); }
+
     static EndPlatform endPlatform(BlockPos spawn, float westYaw) {
         Vec3 vanillaPosition = Vec3.atBottomCenterOf(spawn);
         return new EndPlatform(BlockPos.containing(vanillaPosition).below(),
@@ -76,11 +78,11 @@ public final class SpawnDestination {
         return new Selection(Outcome.UNSAFE, null);
     }
 
-    static Result find(ServerPlayer player, ServerLevel level) {
+    static Result find(ServerPlayer player, ServerLevel level, boolean force) {
         Entity root = player.getRootVehicle();
         int rootWidth = root == player ? 1 : (int) Math.max(1, Math.ceil(root.getBbWidth()));
         int rootHeight = root == player ? 2 : (int) Math.max(3, Math.ceil(root.getBbHeight()) + 2);
-        if (level.dimension().equals(Level.END)) return findEnd(level, root, player);
+        if (level.dimension().equals(Level.END)) return findEnd(level, root, player, force);
 
         BlockPos center;
         try {
@@ -89,6 +91,10 @@ public final class SpawnDestination {
         } catch (RuntimeException spawnReadFailure) {
             Center fallback = fallbackCenter();
             center = new BlockPos(fallback.x, fallback.y, fallback.z);
+        }
+        if (force) {
+            return new Result(Outcome.ACCEPT, new DestinationSafety.Prepared(level,
+                    rawPosition(center), root.getYRot(), root.getXRot()));
         }
 
         BlockPos resolvedCenter = center;
@@ -109,8 +115,13 @@ public final class SpawnDestination {
                 root.getYRot(), root.getXRot()));
     }
 
-    private static Result findEnd(ServerLevel level, Entity root, ServerPlayer player) {
+    private static Result findEnd(ServerLevel level, Entity root, ServerPlayer player, boolean force) {
         EndPlatform platform = endPlatform(ServerLevel.END_SPAWN_POINT, Direction.WEST.toYRot());
+        if (force) {
+            EndPlatformFeature.createEndPlatform(level, platform.platformAnchor, true);
+            return new Result(Outcome.ACCEPT, new DestinationSafety.Prepared(level,
+                    platform.feet, platform.yaw, platform.pitch));
+        }
         Set<Long> loadedChunks = new HashSet<>();
         Outcome outcome = acceptEnd(
                 () -> DestinationSafety.endFits(

@@ -23,8 +23,12 @@ public final class ConfigTest {
     private static void missingConfigCreatesCompleteDefaults(Path path) throws Exception {
         OmwhConfig config = OmwhConfig.load(path);
         check(config.homeCommand.equals("home") && config.spawnCommand.equals("spawn"), "default commands");
+        check(config.enableForceOverride, "force override enabled by default");
+        check(config.unsafeHomeMessage.equals("§cIt is not safe to teleport here."), "unsafe home default");
+        check(config.unsafeSpawnMessage.equals("§cIt is not safe to teleport here."), "unsafe spawn default");
         String json = Files.readString(path);
         check(json.contains("\"regularCooldownSeconds\": 30"), "complete default cooldown");
+        check(json.contains("\"enableForceOverride\": true"), "complete default force setting");
         check(json.contains("\"regularCooldownMessage\""), "complete default messages");
     }
 
@@ -56,6 +60,9 @@ public final class ConfigTest {
         Path quotedBoolean = root.resolve("quoted-boolean.json");
         Files.writeString(quotedBoolean, "{\"enableRegularCooldown\":\"false\"}");
         expectFailure(() -> OmwhConfig.load(quotedBoolean), "quoted boolean");
+        Path quotedForceBoolean = root.resolve("quoted-force-boolean.json");
+        Files.writeString(quotedForceBoolean, "{\"enableForceOverride\":\"false\"}");
+        expectFailure(() -> OmwhConfig.load(quotedForceBoolean), "quoted force boolean");
     }
 
     private static void unknownFieldsRemainPermissive(Path path) throws Exception {

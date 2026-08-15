@@ -13,14 +13,17 @@ import java.util.concurrent.atomic.AtomicInteger;
 public final class DestinationsTest {
     public static void main(String[] args) {
         homePolicyAllowsOnlyAcceptedSameDimensionRespawnAndOneBedAlternate();
+        unmountedHomeRejectsHazardsUnlessForceWasRequested();
+        forceSpawnUsesTheRawWorldDestination();
         mountedHomeClearanceUsesRootMarginsAndOnlyBedPolicyExemption();
+        mountedHazardsDoNotMasqueradeAsVehicleClearanceFailures();
         endPolicyUsesVanillaPlatformPlacement();
         endPlatformMutationFollowsSideEffectFreeAcceptance();
         spawnSearchIsBoundedDeterministicAndComplete();
         spawnFailureDistinguishesOversizedVehicle();
         collisionOwnersIncludeShellAndEveryInvolvedChunk();
         safetyOwnsFootprintsHazardsAndFiveByFiveChunkPreparation();
-        System.out.println("DestinationsTest PASS (8 behavior groups)");
+        System.out.println("DestinationsTest PASS (11 behavior groups)");
     }
 
     private static void homePolicyAllowsOnlyAcceptedSameDimensionRespawnAndOneBedAlternate() {
@@ -35,6 +38,21 @@ public final class DestinationsTest {
         check(!HomeDestination.mayTryAboveBed(true, true, true, false), "forced home");
     }
 
+    private static void unmountedHomeRejectsHazardsUnlessForceWasRequested() {
+        check(DestinationSafety.isUnsafeHomeCell(true, "block.minecraft.stone"), "home fluid hazard");
+        check(DestinationSafety.isUnsafeHomeCell(false, "block.minecraft.lava"), "home lava hazard");
+        check(DestinationSafety.isUnsafeHomeCell(false, "block.minecraft.cactus"), "home cactus hazard");
+        check(!DestinationSafety.isUnsafeHomeCell(false, "block.minecraft.stone"), "ordinary home block");
+        check(!HomeDestination.mayUseRespawn(false, false), "unsafe vanilla respawn denied");
+        check(HomeDestination.mayUseRespawn(false, true), "force bypasses only destination safety");
+        check(HomeDestination.mayUseRespawn(true, false), "safe vanilla respawn accepted");
+    }
+
+    private static void forceSpawnUsesTheRawWorldDestination() {
+        check(SpawnDestination.rawPosition(new BlockPos(12, 70, -4)).equals(new Vec3(12.5, 70, -3.5)),
+                "raw spawn is the authoritative block-center feet position");
+    }
+
     private static void mountedHomeClearanceUsesRootMarginsAndOnlyBedPolicyExemption() {
         var root = new DestinationSafety.Bounds(0, 64, 0, 1, 65, 1);
         var clearance = DestinationSafety.mountedHomeClearance(root);
@@ -45,6 +63,24 @@ public final class DestinationsTest {
         check(!DestinationSafety.blocksMountedHome(root, clearance, marginObstacle, true), "bed margin exemption");
         var rootObstacle = new DestinationSafety.Bounds(0.2, 64, 0.2, 0.8, 65, 0.8);
         check(DestinationSafety.blocksMountedHome(root, clearance, rootObstacle, true), "bed never exempts root collision");
+        check(DestinationSafety.homeHazardCells(root).equals(
+                new DestinationSafety.CellRange(0, 0, 63, 64, 0, 0)),
+                "mounted hazard checks cover the root and its support layer, not only collision shapes");
+    }
+
+    private static void mountedHazardsDoNotMasqueradeAsVehicleClearanceFailures() {
+        check(HomeDestination.chooseMounted(DestinationSafety.HomeFit.UNSAFE, true,
+                        DestinationSafety.HomeFit.FITS) == HomeDestination.MountedChoice.UNSAFE,
+                "unsafe exact destination never falls through to the bed fallback");
+        check(HomeDestination.chooseMounted(DestinationSafety.HomeFit.BLOCKED, true,
+                        DestinationSafety.HomeFit.UNSAFE) == HomeDestination.MountedChoice.UNSAFE,
+                "unsafe bed fallback reports unsafe");
+        check(HomeDestination.chooseMounted(DestinationSafety.HomeFit.BLOCKED, true,
+                        DestinationSafety.HomeFit.FITS) == HomeDestination.MountedChoice.ABOVE_BED,
+                "clearance failure may use a safe bed fallback");
+        check(HomeDestination.chooseMounted(DestinationSafety.HomeFit.BLOCKED, false,
+                        DestinationSafety.HomeFit.BLOCKED) == HomeDestination.MountedChoice.VEHICLE_TOO_LARGE,
+                "geometry-only denial retains the vehicle message");
     }
 
     private static void endPolicyUsesVanillaPlatformPlacement() {
