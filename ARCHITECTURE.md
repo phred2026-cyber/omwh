@@ -50,6 +50,8 @@ omwh/
 │               # Vehicle/passenger movement, failed preparation, and attachment preservation.
 ├── ARCHITECTURE.md
 │   # This proposed file tree. Bug and verification checks compare code placement against it.
+├── FEATURES.md
+│   # Accepted behavior contract preserved while the implementation is rebuilt.
 ├── README.md
 │   # Installation, commands, full config reference, and gameplay behavior.
 ├── CHANGELOG.md
@@ -59,10 +61,9 @@ omwh/
 ├── build.gradle
 │   # Fabric Loom build and all verification tasks.
 ├── gradle.properties
-│   # Minecraft, Fabric, Java, and mod versions.
+│   # Minecraft, Fabric, Java, and mod versions plus the preserved com.omwh Maven coordinate.
 ├── settings.gradle
 ├── gradlew
-├── gradlew.bat
 └── gradle/
     ├── minecraft/
     │   ├── 26.2-custom.json

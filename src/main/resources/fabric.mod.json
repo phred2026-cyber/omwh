@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "id": "omwh",
   "version": "${version}",
-  "name": "OMWH",
-  "description": "Adds same-dimension /home and /spawn commands with configurable cooldowns, messages, aliases, effects, and mounted teleport support.",
+  "name": "OMWH (structural groundwork)",
+  "description": "Non-deployable groundwork for the next OMWH implementation. Commands and teleport gameplay are intentionally absent.",
   "authors": [
     "PyreHaven"
   ],
@@ -16,13 +16,9 @@
   "environment": "*",
   "entrypoints": {
     "main": [
-      "com.omwh.OMWH"
+      "xyz.pyrehaven.omwh.Omwh"
     ]
   },
-  "mixins": [
-    "omwh.mixins.json"
-  ],
-  "accessWidener": "omwh.accesswidener",
   "depends": {
     "fabricloader": ">=0.19.3",
     "minecraft": "~26.2",

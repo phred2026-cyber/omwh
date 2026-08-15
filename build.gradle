@@ -50,16 +50,6 @@ sourceSets {
 	}
 }
 
-tasks.register('regressionTest', JavaExec) {
-	group = 'verification'
-	description = 'Runs deterministic OMWH regression tests without a test framework dependency.'
-	dependsOn testClasses
-	classpath = sourceSets.test.runtimeClasspath
-	mainClass = 'com.omwh.utils.RegressionTestSuite'
-}
-
-check.dependsOn regressionTest
-
 tasks.named('test') {
 	failOnNoDiscoveredTests = false
 }
@@ -73,6 +63,7 @@ dependencies {
 	modImplementation "net.fabricmc.fabric-api:fabric-lifecycle-events-v1:4.1.3+4575b05f9c"
 	modImplementation "net.fabricmc.fabric-api:fabric-networking-api-v1:6.3.3+72073ef09c"
 	modImplementation "net.fabricmc.fabric-api:fabric-api-base:2.0.4+ece063239c"
+	modLocalRuntime "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 }
 
 processResources {
