@@ -2,109 +2,76 @@ package com.omwh.utils;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.Iterator;
 import java.util.List;
-import java.util.Objects;
+import java.util.NoSuchElementException;
+import java.util.PriorityQueue;
 
-/** Pure, deterministic safe-location geometry and nearest-first search. */
 public final class SafeLocationPlanner {
     private SafeLocationPlanner() { }
 
-    public record Pos(int x, int y, int z) {
-        public Pos offset(int dx, int dy, int dz) {
-            return new Pos(x + dx, y + dy, z + dz);
-        }
-    }
+    public record Pos(int x, int y, int z) { }
+    private record Horizontal(int x, int z, long squaredDistance) { }
 
-    public record Footprint(int minX, int maxX, int minZ, int maxZ) {
-        public Footprint {
-            if (minX > maxX || minZ > maxZ) throw new IllegalArgumentException("empty footprint");
-        }
+    static Iterable<Pos> nearestOffsets(int radius, int minY, int maxY) {
+        if (radius < 0 || minY > maxY) throw new IllegalArgumentException("invalid search bounds");
 
-        public static Footprint centered(int width) {
-            if (width < 1) throw new IllegalArgumentException("width must be positive");
-            int minimum = -(width / 2);
-            int maximum = minimum + width - 1;
-            return new Footprint(minimum, maximum, minimum, maximum);
-        }
-
-        public int width() {
-            return maxX - minX + 1;
-        }
-
-        /** Block-center offset that keeps this footprint geometrically centered. */
-        public double centerOffset() {
-            return width() % 2 == 0 ? 0.0 : 0.5;
-        }
-    }
-
-    public interface CellProbe {
-        boolean isClear(Pos pos);
-        boolean isSafeSupport(Pos pos);
-    }
-
-    public enum Outcome { EXACT, NEARBY, BLOCKED }
-
-    public record Selection(Outcome outcome, Pos feet) {
-        public Selection {
-            Objects.requireNonNull(outcome, "outcome");
-            if (outcome == Outcome.BLOCKED && feet != null) {
-                throw new IllegalArgumentException("blocked selection cannot contain feet");
-            }
-            if (outcome != Outcome.BLOCKED && feet == null) {
-                throw new IllegalArgumentException("successful selection requires feet");
+        List<Horizontal> horizontal = new ArrayList<>((2 * radius + 1) * (2 * radius + 1));
+        for (int x = -radius; x <= radius; x++) {
+            for (int z = -radius; z <= radius; z++) {
+                horizontal.add(new Horizontal(x, z, (long) x * x + (long) z * z));
             }
         }
-    }
+        horizontal.sort(Comparator.comparingLong(Horizontal::squaredDistance)
+                .thenComparingInt(Horizontal::x)
+                .thenComparingInt(Horizontal::z));
 
-    public static Selection select(Pos targetFeet, int maxRadius, int minYOffset, int maxYOffset,
-                                   Footprint footprint, int height, CellProbe probe) {
-        Objects.requireNonNull(targetFeet, "targetFeet");
-        Objects.requireNonNull(footprint, "footprint");
-        Objects.requireNonNull(probe, "probe");
-        if (maxRadius < 0) throw new IllegalArgumentException("maxRadius cannot be negative");
-        if (minYOffset > maxYOffset) throw new IllegalArgumentException("invalid vertical range");
-        if (height < 1) throw new IllegalArgumentException("height must be positive");
+        return () -> new Iterator<>() {
+            private final PriorityQueue<Cursor> cursors = createCursors();
 
-        List<Offset> candidates = new ArrayList<>((maxRadius * 2 + 1) * (maxRadius * 2 + 1)
-                * (maxYOffset - minYOffset + 1));
-        for (int dx = -maxRadius; dx <= maxRadius; dx++) {
-            for (int dz = -maxRadius; dz <= maxRadius; dz++) {
-                for (int dy = minYOffset; dy <= maxYOffset; dy++) {
-                    candidates.add(new Offset(dx, dy, dz));
+            private PriorityQueue<Cursor> createCursors() {
+                PriorityQueue<Cursor> queue = new PriorityQueue<>(Comparator
+                        .comparingLong(Cursor::squaredDistance)
+                        .thenComparingInt(cursor -> Math.abs(cursor.y))
+                        .thenComparingInt(cursor -> cursor.y)
+                        .thenComparingInt(cursor -> cursor.current().x())
+                        .thenComparingInt(cursor -> cursor.current().z()));
+                for (int y = minY; y <= maxY; y++) queue.add(new Cursor(y));
+                return queue;
+            }
+
+            @Override
+            public boolean hasNext() {
+                return !cursors.isEmpty();
+            }
+
+            @Override
+            public Pos next() {
+                Cursor cursor = cursors.poll();
+                if (cursor == null) throw new NoSuchElementException();
+                Horizontal current = cursor.current();
+                Pos result = new Pos(current.x(), cursor.y, current.z());
+                cursor.index++;
+                if (cursor.index < horizontal.size()) cursors.add(cursor);
+                return result;
+            }
+
+            final class Cursor {
+                private final int y;
+                private int index;
+
+                private Cursor(int y) {
+                    this.y = y;
+                }
+
+                private Horizontal current() {
+                    return horizontal.get(index);
+                }
+
+                private long squaredDistance() {
+                    return current().squaredDistance() + (long) y * y;
                 }
             }
-        }
-        candidates.sort(Comparator
-                .comparingLong(Offset::distanceSquared)
-                .thenComparingInt(offset -> Math.abs(offset.dy()))
-                .thenComparingInt(Offset::dy)
-                .thenComparingInt(Offset::dx)
-                .thenComparingInt(Offset::dz));
-
-        for (Offset offset : candidates) {
-            Pos feet = targetFeet.offset(offset.dx(), offset.dy(), offset.dz());
-            if (isSafe(feet, footprint, height, probe)) {
-                return new Selection(offset.distanceSquared() == 0 ? Outcome.EXACT : Outcome.NEARBY, feet);
-            }
-        }
-        return new Selection(Outcome.BLOCKED, null);
-    }
-
-    private static boolean isSafe(Pos feet, Footprint footprint, int height, CellProbe probe) {
-        for (int dx = footprint.minX(); dx <= footprint.maxX(); dx++) {
-            for (int dz = footprint.minZ(); dz <= footprint.maxZ(); dz++) {
-                if (!probe.isSafeSupport(feet.offset(dx, -1, dz))) return false;
-                for (int dy = 0; dy < height; dy++) {
-                    if (!probe.isClear(feet.offset(dx, dy, dz))) return false;
-                }
-            }
-        }
-        return true;
-    }
-
-    private record Offset(int dx, int dy, int dz) {
-        long distanceSquared() {
-            return (long) dx * dx + (long) dy * dy + (long) dz * dz;
-        }
+        };
     }
 }

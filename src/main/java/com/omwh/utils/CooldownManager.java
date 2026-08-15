@@ -1,183 +1,92 @@
 package com.omwh.utils;
 
-import com.omwh.config.ConfigManager;
-import net.minecraft.server.level.ServerPlayer;
+import com.omwh.config.OmwhConfig;
 
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.LongSupplier;
 
-public class CooldownManager {
-  private final ConcurrentHashMap<UUID, Long> regularCooldowns = new ConcurrentHashMap<>();
-  private final ConcurrentHashMap<UUID, Long> pvpCooldowns = new ConcurrentHashMap<>();
-  private final ConcurrentHashMap<UUID, Long> damageCooldowns = new ConcurrentHashMap<>();
-  private final ConcurrentHashMap<UUID, Long> joinCooldowns = new ConcurrentHashMap<>();
+public final class CooldownManager {
+    public enum Type { PVP, DAMAGE, JOIN, REGULAR, NONE }
+    public record Restriction(Type type, int remainingSeconds) { }
+    private record State(Type timedType, long timedExpiry, long regularExpiry) { }
 
-  public void setRegularCooldown(ServerPlayer player) {
-      var cfg = ConfigManager.get();
-      if (!cfg.enableRegularCooldown || cfg.regularCooldownSeconds <= 0) return;
-      regularCooldowns.put(player.getUUID(), System.currentTimeMillis());
-  }
+    private final OmwhConfig config;
+    private final LongSupplier clock;
+    private final ConcurrentHashMap<UUID, State> players = new ConcurrentHashMap<>();
 
-  public void setPvpCooldown(ServerPlayer player) {
-      var cfg = ConfigManager.get();
-      if (!cfg.enablePvpCooldown || cfg.pvpCooldownSeconds <= 0) return;
-      UUID playerUUID = player.getUUID();
-      long now = System.currentTimeMillis();
-      long newExpiry = now + (cfg.pvpCooldownSeconds * 1000L);
+    public CooldownManager(OmwhConfig config) {
+        this(config, System::currentTimeMillis);
+    }
 
-      long currentMaxExpiry = 0;
-      if (isInPvpCooldown(player)) currentMaxExpiry = Math.max(currentMaxExpiry, pvpCooldowns.get(playerUUID) + (cfg.pvpCooldownSeconds * 1000L));
-      if (isInDamageCooldown(player)) currentMaxExpiry = Math.max(currentMaxExpiry, damageCooldowns.get(playerUUID) + (cfg.damageCooldownSeconds * 1000L));
-      if (isInJoinCooldown(player)) currentMaxExpiry = Math.max(currentMaxExpiry, joinCooldowns.get(playerUUID) + (cfg.joinCooldownSeconds * 1000L));
+    CooldownManager(OmwhConfig config, LongSupplier clock) {
+        this.config = config;
+        this.clock = clock;
+    }
 
-      if (newExpiry > currentMaxExpiry) {
-          pvpCooldowns.put(playerUUID, now);
-          damageCooldowns.remove(playerUUID);
-          joinCooldowns.remove(playerUUID);
-      }
-  }
+    public void recordRegular(UUID player) {
+        if (!config.enableRegularCooldown || config.regularCooldownSeconds == 0) return;
+        long expiry = clock.getAsLong() + seconds(config.regularCooldownSeconds);
+        players.compute(player, (id, old) -> new State(
+                old == null ? Type.NONE : old.timedType,
+                old == null ? 0 : old.timedExpiry,
+                expiry));
+    }
 
-  public void setDamageCooldown(ServerPlayer player) {
-      var cfg = ConfigManager.get();
-      if (!cfg.enableDamageCooldown || cfg.damageCooldownSeconds <= 0) return;
-      UUID playerUUID = player.getUUID();
-      long now = System.currentTimeMillis();
-      long newExpiry = now + (cfg.damageCooldownSeconds * 1000L);
+    public void recordPvp(UUID player) {
+        if (config.enablePvpCooldown) recordTimed(player, Type.PVP, config.pvpCooldownSeconds);
+    }
 
-      long currentMaxExpiry = 0;
-      if (isInPvpCooldown(player)) currentMaxExpiry = Math.max(currentMaxExpiry, pvpCooldowns.get(playerUUID) + (cfg.pvpCooldownSeconds * 1000L));
-      if (isInDamageCooldown(player)) currentMaxExpiry = Math.max(currentMaxExpiry, damageCooldowns.get(playerUUID) + (cfg.damageCooldownSeconds * 1000L));
-      if (isInJoinCooldown(player)) currentMaxExpiry = Math.max(currentMaxExpiry, joinCooldowns.get(playerUUID) + (cfg.joinCooldownSeconds * 1000L));
+    public void recordDamage(UUID player) {
+        if (config.enableDamageCooldown) recordTimed(player, Type.DAMAGE, config.damageCooldownSeconds);
+    }
 
-      if (newExpiry > currentMaxExpiry) {
-          damageCooldowns.put(playerUUID, now);
-          pvpCooldowns.remove(playerUUID);
-          joinCooldowns.remove(playerUUID);
-      }
-  }
+    public void recordJoin(UUID player) {
+        recordTimed(player, Type.JOIN, config.joinCooldownSeconds);
+    }
 
-  public void setJoinCooldown(ServerPlayer player) {
-      var cfg = ConfigManager.get();
-      if (cfg.joinCooldownSeconds <= 0) return;
-      joinCooldowns.put(player.getUUID(), System.currentTimeMillis());
-  }
+    private void recordTimed(UUID player, Type type, int duration) {
+        if (duration == 0) return;
+        long expiry = clock.getAsLong() + seconds(duration);
+        players.compute(player, (id, old) -> {
+            long regular = old == null ? 0 : old.regularExpiry;
+            if (old != null && (old.timedExpiry > expiry
+                    || old.timedExpiry == expiry && priority(old.timedType) >= priority(type))) {
+                return old;
+            }
+            return new State(type, expiry, regular);
+        });
+    }
 
-  public boolean isInRegularCooldown(ServerPlayer player) {
-      var cfg = ConfigManager.get();
-      if (!cfg.enableRegularCooldown || cfg.regularCooldownSeconds <= 0) return false;
-      UUID id = player.getUUID();
-      if (regularCooldowns.containsKey(id)) {
-          long cooldownTime = regularCooldowns.get(id);
-          long duration = cfg.regularCooldownSeconds * 1000L;
-          long now = System.currentTimeMillis();
-          if (now - cooldownTime < duration) return true;
-          else regularCooldowns.remove(id);
-      }
-      return false;
-  }
+    public Restriction restriction(UUID player) {
+        long now = clock.getAsLong();
+        State state = players.get(player);
+        if (state == null) return new Restriction(Type.NONE, 0);
+        if (state.timedExpiry > now) return remaining(state.timedType, state.timedExpiry, now);
+        if (state.regularExpiry > now) return remaining(Type.REGULAR, state.regularExpiry, now);
+        players.remove(player, state);
+        return new Restriction(Type.NONE, 0);
+    }
 
-  public boolean isInPvpCooldown(ServerPlayer player) {
-      var cfg = ConfigManager.get();
-      if (!cfg.enablePvpCooldown || cfg.pvpCooldownSeconds <= 0) return false;
-      UUID id = player.getUUID();
-      if (pvpCooldowns.containsKey(id)) {
-          long cooldownTime = pvpCooldowns.get(id);
-          long duration = cfg.pvpCooldownSeconds * 1000L;
-          long now = System.currentTimeMillis();
-          if (now - cooldownTime < duration) return true;
-          else pvpCooldowns.remove(id);
-      }
-      return false;
-  }
+    private static Restriction remaining(Type type, long expiry, long now) {
+        long milliseconds = Math.max(0, expiry - now);
+        return new Restriction(type, (int) ((milliseconds + 999L) / 1000L));
+    }
 
-  public boolean isInDamageCooldown(ServerPlayer player) {
-      var cfg = ConfigManager.get();
-      if (!cfg.enableDamageCooldown || cfg.damageCooldownSeconds <= 0) return false;
-      UUID id = player.getUUID();
-      if (damageCooldowns.containsKey(id)) {
-          long cooldownTime = damageCooldowns.get(id);
-          long duration = cfg.damageCooldownSeconds * 1000L;
-          long now = System.currentTimeMillis();
-          if (now - cooldownTime < duration) return true;
-          else damageCooldowns.remove(id);
-      }
-      return false;
-  }
+    public void clear(UUID player) {
+        players.remove(player);
+    }
 
-  public boolean isInJoinCooldown(ServerPlayer player) {
-      var cfg = ConfigManager.get();
-      if (cfg.joinCooldownSeconds <= 0) return false;
-      UUID id = player.getUUID();
-      if (joinCooldowns.containsKey(id)) {
-          long joinTime = joinCooldowns.get(id);
-          long duration = cfg.joinCooldownSeconds * 1000L;
-          long now = System.currentTimeMillis();
-          if (now - joinTime < duration) return true;
-          else joinCooldowns.remove(id);
-      }
-      return false;
-  }
+    private static long seconds(int value) {
+        return value * 1000L;
+    }
 
-  public int getRemainingRegularCooldown(ServerPlayer player) {
-      var cfg = ConfigManager.get();
-      if (!cfg.enableRegularCooldown || cfg.regularCooldownSeconds <= 0) return 0;
-      UUID id = player.getUUID();
-      if (regularCooldowns.containsKey(id)) {
-          long cooldownTime = regularCooldowns.get(id);
-          long duration = cfg.regularCooldownSeconds * 1000L;
-          long now = System.currentTimeMillis();
-          long timeLeft = (cooldownTime + duration - now) / 1000;
-          return Math.max(0, (int) timeLeft);
-      }
-      return 0;
-  }
-
-  public int getRemainingPvpCooldown(ServerPlayer player) {
-      var cfg = ConfigManager.get();
-      if (!cfg.enablePvpCooldown || cfg.pvpCooldownSeconds <= 0) return 0;
-      UUID id = player.getUUID();
-      if (pvpCooldowns.containsKey(id)) {
-          long cooldownTime = pvpCooldowns.get(id);
-          long duration = cfg.pvpCooldownSeconds * 1000L;
-          long now = System.currentTimeMillis();
-          long timeLeft = (cooldownTime + duration - now) / 1000;
-          return Math.max(0, (int) timeLeft);
-      }
-      return 0;
-  }
-
-  public int getRemainingDamageCooldown(ServerPlayer player) {
-      var cfg = ConfigManager.get();
-      if (!cfg.enableDamageCooldown || cfg.damageCooldownSeconds <= 0) return 0;
-      UUID id = player.getUUID();
-      if (damageCooldowns.containsKey(id)) {
-          long cooldownTime = damageCooldowns.get(id);
-          long duration = cfg.damageCooldownSeconds * 1000L;
-          long now = System.currentTimeMillis();
-          long timeLeft = (cooldownTime + duration - now) / 1000;
-          return Math.max(0, (int) timeLeft);
-      }
-      return 0;
-  }
-
-  public int getRemainingJoinCooldown(ServerPlayer player) {
-      var cfg = ConfigManager.get();
-      if (cfg.joinCooldownSeconds <= 0) return 0;
-      UUID id = player.getUUID();
-      if (joinCooldowns.containsKey(id)) {
-          long joinTime = joinCooldowns.get(id);
-          long duration = cfg.joinCooldownSeconds * 1000L;
-          long now = System.currentTimeMillis();
-          long timeLeft = (joinTime + duration - now) / 1000;
-          return Math.max(0, (int) timeLeft);
-      }
-      return 0;
-  }
-
-  public boolean shouldBlockTeleport(ServerPlayer player) {
-      return isInPvpCooldown(player) || isInDamageCooldown(player) || isInJoinCooldown(player) || isInRegularCooldown(player);
-  }
-
-  private boolean hasPermission(ServerPlayer player, String permission) { return false; }
+    private static int priority(Type type) {
+        return switch (type) {
+            case PVP -> 3;
+            case DAMAGE -> 2;
+            case JOIN -> 1;
+            case REGULAR, NONE -> 0;
+        };
+    }
 }
-

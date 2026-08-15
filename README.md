@@ -12,9 +12,9 @@ Built by [PyreHaven](https://pyrehaven.xyz).
 
 ## Teleport rules
 
-`/home` uses Minecraft's normal placement around your respawn point. If you are mounted and the vehicle cannot fit beside an uncovered bed, OMWH may place the group directly above it. Invalid, blocked, or cross-dimension homes are refused.
+`/home` asks Minecraft for the exact bed, respawn-anchor, or forced-respawn destination it would normally use, without consuming an anchor charge. The destination must be in the current dimension. An unmounted player uses that vanilla transition directly; a mounted group moves only when the root vehicle fits at that exact position with OMWH's clearance margin. OMWH does not search for another home position or place vehicles above beds.
 
-`/spawn` searches near the spawn point for solid ground with enough clear space for the player or vehicle. In the End, it uses the obsidian platform.
+`/spawn` performs one bounded, deterministic nearest-first search around the current dimension's spawn. A candidate needs safe support and enough collision-free space for the exact translated bounding box of every attached entity.
 
 ## Installation
 
@@ -33,15 +33,27 @@ Edit `config/omwh.json` after the first launch.
 |---|---:|---|
 | `homeCommand` | `"home"` | Name of the home command |
 | `spawnCommand` | `"spawn"` | Name of the spawn command |
+| `enableRegularCooldown` | `true` | Enable the normal teleport cooldown |
 | `regularCooldownSeconds` | `30` | Cooldown between normal teleports |
+| `enablePvpCooldown` | `true` | Enable the cooldown after PvP |
 | `pvpCooldownSeconds` | `45` | Cooldown after PvP |
+| `enableDamageCooldown` | `true` | Enable the cooldown after other damage |
 | `damageCooldownSeconds` | `10` | Cooldown after other damage |
 | `joinCooldownSeconds` | `30` | Cooldown after joining |
 | `playTeleportSound` | `true` | Play a sound after teleporting |
 | `spawnTeleportParticles` | `true` | Show particles after teleporting |
-| Message fields | See config | Text shown to players; supports Minecraft color codes and `{time}` |
+| `homeSuccessMessage` | `"§aTeleported to your home!"` | Successful `/home` message |
+| `spawnSuccessMessage` | `"§aTeleported to world spawn!"` | Successful `/spawn` message |
+| `noHomepointMessage` | `"§cYou don't have a spawn point set!"` | Missing or invalid home message |
+| `crossDimensionMessage` | `"§cYou are not powerful enough to bend space between dimensions. Use a portal first, then try again!"` | Cross-dimension `/home` denial |
+| `unsafeHomeMessage` | `"§cThere is no safe spot at your home to bring you to."` | Blocked mounted-home message |
+| `unsafeSpawnMessage` | `"§cCannot find a safe spawn location - please contact an administrator!"` | No safe spawn candidate message |
+| `pvpCooldownMessage` | `"§cYou were recently in combat! Please wait {time} seconds before teleporting."` | PvP cooldown message |
+| `damageCooldownMessage` | `"§cYou recently took damage! Please wait {time} seconds before teleporting."` | Other-damage cooldown message |
+| `joinCooldownMessage` | `"§cYou must wait {time} seconds after joining before teleporting!"` | Join cooldown message |
+| `regularCooldownMessage` | `"§cYou recently teleported! Please wait {time} seconds before trying again."` | Normal teleport cooldown message |
 
-Set a cooldown to `0` to disable it.
+Set a cooldown duration to `0` to disable it. Setting `enableRegularCooldown`, `enablePvpCooldown`, or `enableDamageCooldown` to `false` disables that cooldown regardless of its duration.
 
 ## Links
 

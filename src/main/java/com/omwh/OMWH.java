@@ -1,49 +1,56 @@
 package com.omwh;
 
-import com.omwh.command.CommandRegistrar;
+import com.omwh.command.CommandSupport;
+import com.omwh.command.HomeCommand;
+import com.omwh.command.SpawnCommand;
 import com.omwh.config.ConfigManager;
-import com.omwh.listeners.PlayerListener;
+import com.omwh.config.OmwhConfig;
 import com.omwh.utils.CooldownManager;
-import com.omwh.utils.EffectsManager;
-import com.omwh.utils.MessageUtils;
-import net.fabricmc.api.EnvType;
 import net.fabricmc.api.ModInitializer;
-import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
-import net.fabricmc.loader.api.FabricLoader;
+import net.fabricmc.fabric.api.command.v2.CommandRegistrationCallback;
+import net.fabricmc.fabric.api.entity.event.v1.ServerLivingEntityEvents;
+import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
+import net.minecraft.server.level.ServerPlayer;
+import net.minecraft.world.damagesource.DamageSource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-public class OMWH implements ModInitializer {
-  private final Logger logger = LoggerFactory.getLogger("omwh");
+public final class OMWH implements ModInitializer {
+    private static final Logger LOGGER = LoggerFactory.getLogger("omwh");
 
-  public static final CooldownManager COOLDOWN_MANAGER = new CooldownManager();
-  public static final EffectsManager EFFECTS_MANAGER = new EffectsManager();
-  public static final MessageUtils MESSAGE_UTILS = new MessageUtils();
+    @Override
+    public void onInitialize() {
+        OmwhConfig config = ConfigManager.load();
+        CooldownManager cooldowns = new CooldownManager(config);
+        CommandSupport commands = new CommandSupport(config, cooldowns);
 
-  @Override
-  public void onInitialize() {
-      ConfigManager.load();
+        CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) -> {
+            HomeCommand.register(dispatcher, commands);
+            SpawnCommand.register(dispatcher, commands);
+        });
+        ServerPlayConnectionEvents.JOIN.register((handler, sender, server) ->
+                cooldowns.recordJoin(handler.player.getUUID()));
+        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) ->
+                cooldowns.clear(handler.player.getUUID()));
+        ServerLivingEntityEvents.AFTER_DAMAGE.register((entity, source, base, taken, blocked) -> {
+            if (taken > 0 && !blocked) {
+                recordAcceptedDamage(entity instanceof ServerPlayer player ? player : null, source, cooldowns);
+            }
+        });
+        ServerLivingEntityEvents.AFTER_DEATH.register((entity, source) ->
+                recordAcceptedDamage(entity instanceof ServerPlayer player ? player : null, source, cooldowns));
 
-      logger.info("OMWH Mod is initializing!");
+        LOGGER.info("OMWH commands ready: /{}, /{}", config.homeCommand, config.spawnCommand);
+    }
 
-      CommandRegistrar.init();
-
-      if (FabricLoader.getInstance().getEnvironmentType() == EnvType.SERVER) {
-          PlayerListener playerListener = new PlayerListener(COOLDOWN_MANAGER);
-          playerListener.registerEvents();
-      } else {
-          ClientLifecycleEvents.CLIENT_STARTED.register(client -> {
-              try {
-                  PlayerListener playerListener = new PlayerListener(COOLDOWN_MANAGER);
-                  playerListener.registerEvents();
-                  logger.info("OMWH: Registered server listeners in integrated environment");
-              } catch (Exception e) {
-                  logger.warn("OMWH: Failed to register server listeners in integrated environment", e);
-              }
-          });
-      }
-
-      logger.info("OMWH commands ready: /{}, /{}", ConfigManager.get().homeCommand, ConfigManager.get().spawnCommand);
-  }
+    private static void recordAcceptedDamage(ServerPlayer victim, DamageSource source,
+                                             CooldownManager cooldowns) {
+        if (victim == null) return;
+        if (source.getEntity() instanceof ServerPlayer attacker) {
+            cooldowns.recordPvp(victim.getUUID());
+            cooldowns.recordPvp(attacker.getUUID());
+        } else {
+            cooldowns.recordDamage(victim.getUUID());
+        }
+    }
 }
-

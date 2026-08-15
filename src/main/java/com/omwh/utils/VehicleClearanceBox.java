@@ -20,10 +20,18 @@ public final class VehicleClearanceBox {
                 vehicle.maxZ() + HORIZONTAL_MARGIN);
     }
 
-    public static boolean blocks(Bounds requiredSpace, Bounds obstacle, boolean homeBedPart) {
-        if (homeBedPart) return false;
-        return obstacle.maxX() > requiredSpace.minX() && obstacle.minX() < requiredSpace.maxX()
-                && obstacle.maxY() > requiredSpace.minY() && obstacle.minY() < requiredSpace.maxY()
-                && obstacle.maxZ() > requiredSpace.minZ() && obstacle.minZ() < requiredSpace.maxZ();
+    public static boolean withinBuildHeight(Bounds box, int minY, int maxY) {
+        return box.minY() >= minY && box.maxY() <= (double) maxY + 1.0;
+    }
+
+    public static boolean blocks(Bounds vehicle, Bounds policy, Bounds obstacle, boolean homeBedPart) {
+        if (intersects(vehicle, obstacle)) return true;
+        return !homeBedPart && intersects(policy, obstacle);
+    }
+
+    private static boolean intersects(Bounds first, Bounds second) {
+        return second.maxX() > first.minX() && second.minX() < first.maxX()
+                && second.maxY() > first.minY() && second.minY() < first.maxY()
+                && second.maxZ() > first.minZ() && second.minZ() < first.maxZ();
     }
 }

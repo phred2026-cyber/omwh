@@ -1,25 +1,32 @@
 package com.omwh.utils;
 
+import com.omwh.config.ConfigParserRegressionTest;
+import com.omwh.config.OmwhConfig;
+
 import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.UUID;
+import java.util.concurrent.atomic.AtomicLong;
 
 public final class RegressionTestSuite {
     public static void main(String[] args) {
         mountedTreeSnapshotRequiresEveryOriginalParentToRemainAttached();
-        footprintIsCenteredForOddAndEvenWidths();
-        safeSelectionUsesFeetFullSupportHeadroomAndNearestBoundedCandidate();
-        safeSelectionReportsExactNearbyAndBlockedOutcomes();
-        homeRejectsAbsentRespawnConfiguration();
-        homeRejectsVanillaMissingRespawnBlockTransition();
-        homeRejectsCrossDimensionVanillaTransition();
-        homeRejectsMountedTreeWhenRootCannotFitExactVanillaDestination();
-        vehicleClearanceAddsHalfBlockHorizontallyAndOneAndAHalfAbove();
-        homeBedDoesNotBlockItsOwnVehicleClearance();
-        mountedHomeUsesOnlyTheSingleAboveBedFallbackAfterExactClearanceFails();
+        homeRejectsAbsentOrInvalidRespawnConfiguration();
+        vehicleClearanceAddsRequestedPolicyMargins();
+        mountedBoundsUseExclusiveMaximumAndExactChunkCoverage();
+        collisionOwnersIncludeNeighboringShapeCells();
+        capturedTreeMembersAreNotExternalCollisions();
+        homeBedCollisionIsExemptOnlyFromPolicyMargin();
+        ConfigParserRegressionTest.run();
+        configRejectsInvalidOperatorInputPrecisely();
+        nearestSearchOrderIsLazyAndDeterministic();
+        cooldownStateHasOneAuthoritativeLookupAndLongestRestriction();
+        cooldownRoundingAndTiePrecedenceAreStable();
         System.out.println("OMWH regression tests passed");
     }
 
@@ -41,175 +48,208 @@ public final class RegressionTestSuite {
                 "a passenger on the wrong parent must not count as preserved");
     }
 
-    private static void footprintIsCenteredForOddAndEvenWidths() {
-        SafeLocationPlanner.Footprint odd = SafeLocationPlanner.Footprint.centered(3);
-        SafeLocationPlanner.Footprint even = SafeLocationPlanner.Footprint.centered(2);
-        assertEquals(-1, odd.minX(), "odd footprint minimum");
-        assertEquals(1, odd.maxX(), "odd footprint maximum");
-        assertEquals(3, odd.width(), "odd footprint width");
-        assertEquals(0.5, odd.centerOffset(), "odd footprint center offset");
-        assertEquals(-1, even.minX(), "even footprint minimum");
-        assertEquals(0, even.maxX(), "even footprint maximum");
-        assertEquals(2, even.width(), "even footprint width");
-        assertEquals(0.0, even.centerOffset(), "even footprint center offset");
-    }
-
-    private static void safeSelectionUsesFeetFullSupportHeadroomAndNearestBoundedCandidate() {
-        SafeLocationPlanner.Pos targetFeet = new SafeLocationPlanner.Pos(0, 64, 0);
-        SafeLocationPlanner.Footprint footprint = SafeLocationPlanner.Footprint.centered(2);
-        Set<SafeLocationPlanner.Pos> support = new HashSet<>();
-        addSupport(support, -1, 64, footprint);
-        addSupport(support, 3, 64, footprint);
-        Set<SafeLocationPlanner.Pos> blocked = Set.of(new SafeLocationPlanner.Pos(-1, 66, 0));
-        List<SafeLocationPlanner.Pos> inspected = new ArrayList<>();
-
-        SafeLocationPlanner.Selection selection = SafeLocationPlanner.select(
-                targetFeet, 3, -2, 10, footprint, 3,
-                new SafeLocationPlanner.CellProbe() {
-                    public boolean isClear(SafeLocationPlanner.Pos pos) {
-                        inspected.add(pos);
-                        return !blocked.contains(pos);
-                    }
-                    public boolean isSafeSupport(SafeLocationPlanner.Pos pos) {
-                        inspected.add(pos);
-                        return support.contains(pos);
-                    }
-                });
-
-        assertEquals(SafeLocationPlanner.Outcome.NEARBY, selection.outcome(), "selection outcome");
-        assertEquals(new SafeLocationPlanner.Pos(3, 64, 0), selection.feet(),
-                "selection did not return the nearest valid feet coordinate");
-        assertTrue(inspected.stream().allMatch(pos -> Math.abs(pos.x() - targetFeet.x()) <= 4
-                        && Math.abs(pos.z() - targetFeet.z()) <= 4
-                        && pos.y() >= targetFeet.y() - 3 && pos.y() <= targetFeet.y() + 12),
-                "search inspected cells outside its bounded candidate volumes");
-    }
-
-    private static void safeSelectionReportsExactNearbyAndBlockedOutcomes() {
-        SafeLocationPlanner.Pos target = new SafeLocationPlanner.Pos(10, 70, 10);
-        SafeLocationPlanner.Footprint one = SafeLocationPlanner.Footprint.centered(1);
-        SafeLocationPlanner.CellProbe exactProbe = probeForFeet(Set.of(target), one, 2);
-        assertEquals(SafeLocationPlanner.Outcome.EXACT,
-                SafeLocationPlanner.select(target, 2, -1, 1, one, 2, exactProbe).outcome(),
-                "safe target should be reported as exact");
-
-        SafeLocationPlanner.Pos nearby = new SafeLocationPlanner.Pos(11, 70, 10);
-        SafeLocationPlanner.CellProbe nearbyProbe = probeForFeet(Set.of(nearby), one, 2);
-        SafeLocationPlanner.Selection moved = SafeLocationPlanner.select(target, 2, -1, 1, one, 2, nearbyProbe);
-        assertEquals(SafeLocationPlanner.Outcome.NEARBY, moved.outcome(), "fallback should be understandable");
-        assertEquals(nearby, moved.feet(), "nearby fallback feet coordinate");
-
-        SafeLocationPlanner.Selection blocked = SafeLocationPlanner.select(
-                target, 2, -1, 1, one, 2, probeForFeet(Set.of(), one, 2));
-        assertEquals(SafeLocationPlanner.Outcome.BLOCKED, blocked.outcome(), "blocked search outcome");
-        assertEquals(null, blocked.feet(), "blocked search must not invent a fallback");
-    }
-
-    private static void homeRejectsAbsentRespawnConfiguration() {
+    private static void homeRejectsAbsentOrInvalidRespawnConfiguration() {
         assertEquals(HomeRespawnDecision.Outcome.NO_HOME,
-                HomeRespawnDecision.decide(false, false, true, false, true),
-                "a player without a configured bed or anchor must not fall back to world spawn");
-    }
-
-    private static void homeRejectsVanillaMissingRespawnBlockTransition() {
-        assertEquals(HomeRespawnDecision.Outcome.NO_HOME,
-                HomeRespawnDecision.decide(true, true, true, false, true),
+                HomeRespawnDecision.decide(true, true),
                 "a missing respawn block transition must not be used by /home");
-    }
-
-    private static void homeRejectsCrossDimensionVanillaTransition() {
         assertEquals(HomeRespawnDecision.Outcome.CROSS_DIMENSION,
-                HomeRespawnDecision.decide(true, false, false, false, true),
+                HomeRespawnDecision.decide(false, false),
                 "/home must not follow a vanilla transition into another dimension");
-    }
-
-    private static void homeRejectsMountedTreeWhenRootCannotFitExactVanillaDestination() {
-        assertEquals(HomeRespawnDecision.Outcome.VEHICLE_TOO_BIG,
-                HomeRespawnDecision.decide(true, false, true, true, false),
-                "mounted /home must fail instead of searching away from vanilla's exact destination");
         assertEquals(HomeRespawnDecision.Outcome.ACCEPT,
-                HomeRespawnDecision.decide(true, false, true, false, false),
-                "an unmounted player uses vanilla's already-validated destination");
+                HomeRespawnDecision.decide(false, true),
+                "a valid same-dimension vanilla transition must be accepted");
     }
 
-    private static void vehicleClearanceAddsHalfBlockHorizontallyAndOneAndAHalfAbove() {
+    private static void vehicleClearanceAddsRequestedPolicyMargins() {
         VehicleClearanceBox.Bounds clearance = VehicleClearanceBox.around(
                 new VehicleClearanceBox.Bounds(10.25, 64.0, -4.75, 11.75, 65.5, -3.25));
-
         assertEquals(new VehicleClearanceBox.Bounds(9.75, 64.0, -5.25, 12.25, 67.0, -2.75),
-                clearance,
-                "vehicle clearance must use the exact requested horizontal and upper margins");
+                clearance, "vehicle clearance must use the requested horizontal and upper margins");
     }
 
-    private static void homeBedDoesNotBlockItsOwnVehicleClearance() {
-        VehicleClearanceBox.Bounds required =
-                new VehicleClearanceBox.Bounds(0.25, 64.0, 0.25, 2.75, 68.0, 2.75);
-        VehicleClearanceBox.Bounds overlappingBed =
-                new VehicleClearanceBox.Bounds(0.0, 64.0, 0.0, 1.0, 64.5625, 1.0);
+    private static void mountedBoundsUseExclusiveMaximumAndExactChunkCoverage() {
+        VehicleClearanceBox.Bounds topInclusive =
+                new VehicleClearanceBox.Bounds(0, -64, 0, 1, 321, 1);
+        assertTrue(VehicleClearanceBox.withinBuildHeight(topInclusive, -64, 320),
+                "an exclusive max at getMaxY + 1 must fit");
+        assertTrue(!VehicleClearanceBox.withinBuildHeight(
+                        new VehicleClearanceBox.Bounds(0, -64.001, 0, 1, 100, 1), -64, 320),
+                "a box below minimum build height must fail");
+        assertTrue(!VehicleClearanceBox.withinBuildHeight(
+                        new VehicleClearanceBox.Bounds(0, 0, 0, 1, 321.001, 1), -64, 320),
+                "a box above the exclusive build ceiling must fail");
 
-        assertTrue(!VehicleClearanceBox.blocks(required, overlappingBed, true),
-                "the home bed must not reject an otherwise open mounted destination");
-        assertTrue(VehicleClearanceBox.blocks(required, overlappingBed, false),
-                "the same overlapping collision volume must block when it is not the home bed");
+        Set<Long> loaded = new HashSet<>();
+        List<Long> callbacks = new ArrayList<>();
+        ChunkCoverage.loadNew(loaded, new ChunkCoverage.Range(0, 1, 0, 0),
+                (x, z) -> callbacks.add(ChunkCoverage.key(x, z)));
+        ChunkCoverage.loadNew(loaded, new ChunkCoverage.Range(1, 2, 0, 0),
+                (x, z) -> callbacks.add(ChunkCoverage.key(x, z)));
+        assertEquals(3, loaded.size(), "overlapping candidate ranges must deduplicate chunk keys");
+        assertEquals(3, callbacks.size(), "the production chunk loader must visit each new chunk once");
     }
 
-    private static void mountedHomeUsesOnlyTheSingleAboveBedFallbackAfterExactClearanceFails() {
-        MountedHomeFallback.Position aboveBed = MountedHomeFallback.aboveBed(12, 64, -7);
-        assertEquals(new MountedHomeFallback.Position(12.5, 65.0, -6.5), aboveBed,
-                "the fallback must be centered exactly one block above the configured bed block");
-
-        assertEquals(MountedHomeFallback.Choice.VANILLA,
-                MountedHomeFallback.choose(true, true, false, true, false),
-                "vanilla's exact adjacent position must win whenever it clears");
-        assertEquals(MountedHomeFallback.Choice.ABOVE_BED,
-                MountedHomeFallback.choose(true, true, false, false, true),
-                "a mounted bed home may use the one above-bed fallback when exact clearance fails");
-        assertEquals(MountedHomeFallback.Choice.DENY,
-                MountedHomeFallback.choose(true, true, false, false, false),
-                "a roof blocking the fallback clearance must deny teleportation");
-        assertEquals(MountedHomeFallback.Choice.DENY,
-                MountedHomeFallback.choose(true, false, false, false, true),
-                "anchors must never use the bed fallback");
-        assertEquals(MountedHomeFallback.Choice.DENY,
-                MountedHomeFallback.choose(true, true, true, false, true),
-                "forced homes must never use the bed fallback even when their block is a bed");
-        assertEquals(MountedHomeFallback.Choice.VANILLA,
-                MountedHomeFallback.choose(false, true, false, false, true),
-                "unmounted players must keep vanilla's exact respawn destination");
+    private static void collisionOwnersIncludeNeighboringShapeCells() {
+        ChunkCoverage.BlockRange owners = ChunkCoverage.blockOwners(
+                new VehicleClearanceBox.Bounds(0.25, 64.0, 0.25, 0.75, 66.0, 0.75));
+        assertEquals(new ChunkCoverage.BlockRange(-1, 63, -1, 1, 66, 1), owners,
+                "collision checks must include the one-block owner shell around an AABB");
+        assertEquals(new ChunkCoverage.Range(-1, 0, -1, 0), ChunkCoverage.chunkRange(owners),
+                "chunk loading must cover every neighboring collision-shape owner");
     }
 
-    private static SafeLocationPlanner.CellProbe probeForFeet(
-            Set<SafeLocationPlanner.Pos> validFeet, SafeLocationPlanner.Footprint footprint, int height) {
-        Set<SafeLocationPlanner.Pos> supports = new HashSet<>();
-        Set<SafeLocationPlanner.Pos> clear = new HashSet<>();
-        for (SafeLocationPlanner.Pos feet : validFeet) {
-            addSupport(supports, feet.x(), feet.y(), footprint, feet.z());
-            for (int dx = footprint.minX(); dx <= footprint.maxX(); dx++) {
-                for (int dz = footprint.minZ(); dz <= footprint.maxZ(); dz++) {
-                    for (int dy = 0; dy < height; dy++) {
-                        clear.add(new SafeLocationPlanner.Pos(feet.x() + dx, feet.y() + dy, feet.z() + dz));
-                    }
-                }
+    private static void capturedTreeMembersAreNotExternalCollisions() {
+        Node root = new Node("root");
+        Node passenger = new Node("passenger");
+        Node external = new Node("external");
+        List<Node> captured = List.of(root, passenger);
+        assertTrue(!EntityOwnership.isExternal(captured, root),
+                "the captured root must not collide with its own prepared tree");
+        assertTrue(!EntityOwnership.isExternal(captured, passenger),
+                "captured passengers must not reject their prepared destination");
+        assertTrue(EntityOwnership.isExternal(captured, external),
+                "an uncaptured entity must remain an external collision");
+        assertTrue(EntityOwnership.isExternal(captured, new Node("passenger")),
+                "tree ownership must use identity rather than value equality");
+    }
+
+    private static void homeBedCollisionIsExemptOnlyFromPolicyMargin() {
+        VehicleClearanceBox.Bounds vehicle =
+                new VehicleClearanceBox.Bounds(0.75, 64.0, 0.75, 2.25, 65.0, 2.25);
+        VehicleClearanceBox.Bounds marginOnlyBed =
+                new VehicleClearanceBox.Bounds(0.25, 64.0, 0.25, 0.75, 64.5625, 1.0);
+        VehicleClearanceBox.Bounds intersectingBed =
+                new VehicleClearanceBox.Bounds(0.5, 64.0, 0.5, 1.0, 64.5625, 1.0);
+
+        assertTrue(!VehicleClearanceBox.blocks(vehicle, VehicleClearanceBox.around(vehicle), marginOnlyBed, true),
+                "the connected home bed may occupy only the additional policy margin");
+        assertTrue(VehicleClearanceBox.blocks(vehicle, VehicleClearanceBox.around(vehicle), intersectingBed, true),
+                "the connected home bed must block the actual translated vehicle box");
+    }
+
+    private static void configRejectsInvalidOperatorInputPrecisely() {
+        new OmwhConfig().validate();
+
+        OmwhConfig duplicate = new OmwhConfig();
+        duplicate.spawnCommand = duplicate.homeCommand;
+        assertThrows(IllegalArgumentException.class, duplicate::validate, "command names must be distinct");
+
+        OmwhConfig malformed = new OmwhConfig();
+        malformed.homeCommand = "home now";
+        assertThrows(IllegalArgumentException.class, malformed::validate, "command names must be one literal");
+
+        OmwhConfig negative = new OmwhConfig();
+        negative.damageCooldownSeconds = -1;
+        assertThrows(IllegalArgumentException.class, negative::validate, "durations cannot be negative");
+
+        OmwhConfig missingMessage = new OmwhConfig();
+        missingMessage.homeSuccessMessage = null;
+        Throwable error = assertThrows(IllegalArgumentException.class, missingMessage::validate,
+                "required messages cannot be null");
+        assertTrue(error.getMessage().contains("homeSuccessMessage"),
+                "null message validation must name the invalid field");
+    }
+
+    private static void nearestSearchOrderIsLazyAndDeterministic() {
+        var offsets = SafeLocationPlanner.nearestOffsets(64, -2, 10).iterator();
+        List<SafeLocationPlanner.Pos> first = new ArrayList<>();
+        for (int i = 0; i < 7; i++) first.add(offsets.next());
+        assertEquals(List.of(
+                new SafeLocationPlanner.Pos(0, 0, 0),
+                new SafeLocationPlanner.Pos(-1, 0, 0),
+                new SafeLocationPlanner.Pos(0, 0, -1),
+                new SafeLocationPlanner.Pos(0, 0, 1),
+                new SafeLocationPlanner.Pos(1, 0, 0),
+                new SafeLocationPlanner.Pos(0, -1, 0),
+                new SafeLocationPlanner.Pos(0, 1, 0)), first,
+                "nearest offsets must preserve the specified prefix");
+
+        List<SafeLocationPlanner.Pos> expected = new ArrayList<>();
+        for (int y = -2; y <= 3; y++) {
+            for (int x = -3; x <= 3; x++) {
+                for (int z = -3; z <= 3; z++) expected.add(new SafeLocationPlanner.Pos(x, y, z));
             }
         }
-        return new SafeLocationPlanner.CellProbe() {
-            public boolean isClear(SafeLocationPlanner.Pos pos) { return clear.contains(pos); }
-            public boolean isSafeSupport(SafeLocationPlanner.Pos pos) { return supports.contains(pos); }
-        };
-    }
+        Comparator<SafeLocationPlanner.Pos> order = Comparator
+                .comparingInt((SafeLocationPlanner.Pos pos) -> pos.x() * pos.x() + pos.y() * pos.y() + pos.z() * pos.z())
+                .thenComparingInt(pos -> Math.abs(pos.y()))
+                .thenComparingInt(SafeLocationPlanner.Pos::y)
+                .thenComparingInt(SafeLocationPlanner.Pos::x)
+                .thenComparingInt(SafeLocationPlanner.Pos::z);
+        expected.sort(order);
+        List<SafeLocationPlanner.Pos> actual = new ArrayList<>();
+        SafeLocationPlanner.nearestOffsets(3, -2, 3).forEach(actual::add);
+        assertEquals(expected, actual, "the complete small search must match an independently sorted reference");
 
-    private static void addSupport(Set<SafeLocationPlanner.Pos> support, int feetX, int feetY,
-                                   SafeLocationPlanner.Footprint footprint) {
-        addSupport(support, feetX, feetY, footprint, 0);
-    }
-
-    private static void addSupport(Set<SafeLocationPlanner.Pos> support, int feetX, int feetY,
-                                   SafeLocationPlanner.Footprint footprint, int feetZ) {
-        for (int dx = footprint.minX(); dx <= footprint.maxX(); dx++) {
-            for (int dz = footprint.minZ(); dz <= footprint.maxZ(); dz++) {
-                support.add(new SafeLocationPlanner.Pos(feetX + dx, feetY - 1, feetZ + dz));
-            }
+        long started = System.nanoTime();
+        Set<SafeLocationPlanner.Pos> unique = new HashSet<>();
+        int count = 0;
+        for (SafeLocationPlanner.Pos pos : SafeLocationPlanner.nearestOffsets(64, -2, 10)) {
+            count++;
+            assertTrue(unique.add(pos), "radius-64 search must not repeat " + pos);
+            assertTrue(Math.abs(pos.x()) <= 64 && Math.abs(pos.z()) <= 64
+                            && pos.y() >= -2 && pos.y() <= 10,
+                    "radius-64 search must stay within bounds");
         }
+        long elapsedMillis = (System.nanoTime() - started) / 1_000_000;
+        assertEquals(216_333, count, "radius-64 search must emit every actual coordinate exactly once");
+        assertTrue(elapsedMillis < 1_000,
+                "radius-64 enumeration took " + elapsedMillis + " ms; search enumeration regressed pathologically");
+        System.out.println("SafeLocationPlanner radius-64 enumeration: " + elapsedMillis + " ms for " + count + " candidates");
+    }
+
+    private static void cooldownStateHasOneAuthoritativeLookupAndLongestRestriction() {
+        OmwhConfig config = new OmwhConfig();
+        config.regularCooldownSeconds = 60;
+        AtomicLong now = new AtomicLong(1_000L);
+        CooldownManager cooldowns = new CooldownManager(config, now::get);
+        UUID player = UUID.randomUUID();
+
+        cooldowns.recordDamage(player);
+        cooldowns.recordJoin(player);
+        assertEquals(CooldownManager.Type.JOIN, cooldowns.restriction(player).type(),
+                "the longer join restriction must replace shorter damage");
+        cooldowns.recordPvp(player);
+        assertEquals(CooldownManager.Type.PVP, cooldowns.restriction(player).type(),
+                "the longer PvP restriction must replace join");
+
+        cooldowns.recordRegular(player);
+        now.set(46_000L);
+        assertEquals(CooldownManager.Type.REGULAR, cooldowns.restriction(player).type(),
+                "regular cooldown remains independent after combat expires");
+        cooldowns.clear(player);
+        assertEquals(CooldownManager.Type.NONE, cooldowns.restriction(player).type(),
+                "disconnect cleanup removes all state for the player");
+    }
+
+    private static void cooldownRoundingAndTiePrecedenceAreStable() {
+        OmwhConfig config = new OmwhConfig();
+        config.damageCooldownSeconds = 45;
+        config.pvpCooldownSeconds = 45;
+        AtomicLong now = new AtomicLong(1_000L);
+        CooldownManager cooldowns = new CooldownManager(config, now::get);
+        UUID player = UUID.randomUUID();
+
+        cooldowns.recordDamage(player);
+        cooldowns.recordPvp(player);
+        assertEquals(CooldownManager.Type.PVP, cooldowns.restriction(player).type(),
+                "equal expiry uses the command admission precedence");
+
+        cooldowns.clear(player);
+        cooldowns.recordJoin(player);
+        now.incrementAndGet();
+        assertEquals(30, cooldowns.restriction(player).remainingSeconds(),
+                "a partial final second must be shown as remaining");
+    }
+
+    private static Throwable assertThrows(Class<? extends Throwable> type, Runnable action, String message) {
+        try {
+            action.run();
+        } catch (Throwable thrown) {
+            if (type.isInstance(thrown)) return thrown;
+            throw new AssertionError(message + "; unexpected exception=" + thrown, thrown);
+        }
+        throw new AssertionError(message + "; expected exception=" + type.getSimpleName());
     }
 
     private static void assertEquals(Object expected, Object actual, String message) {
