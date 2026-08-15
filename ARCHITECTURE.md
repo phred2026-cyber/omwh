@@ -40,20 +40,14 @@ omwh/
 │   │           # Packaged OMWH icon. No mixin or access-widener file without a feature that needs it.
 │   └── test/
 │       └── java/xyz/pyrehaven/omwh/
-│           ├── OmwhConfigTest.java
-│           │   # Every config field, defaults, validation, malformed files, and round trips.
-│           ├── CommandsTest.java
-│           │   # Both configured commands use one shared flow with correct messages and effects.
-│           ├── CooldownsTest.java
-│           │   # Regular, PvP, damage, and join timing, priority, expiry, and event updates.
-│           ├── HomeDestinationTest.java
-│           │   # Vanilla homes, same-dimension rule, mounted fit, and above-bed fallback cases.
-│           ├── SpawnDestinationTest.java
-│           │   # Deterministic bounds/order, exhaustion, footprint selection, and End behavior.
-│           ├── DestinationSafetyTest.java
-│           │   # Shared chunk, border, support, hazard, fluid, collision, and footprint rules.
+│           ├── ConfigTest.java
+│           │   # Config loading, defaults, validation, malformed files, and round trips.
+│           ├── CommandsAndCooldownsTest.java
+│           │   # Both commands, shared flow, messages, effects, and all cooldown rules.
+│           ├── DestinationsTest.java
+│           │   # Home, spawn, safety checks, mounted placement, and End behavior.
 │           └── TeleportServiceTest.java
-│               # One root movement, passenger-tree preservation, and failed-preparation safety.
+│               # Vehicle/passenger movement, failed preparation, and attachment preservation.
 ├── ARCHITECTURE.md
 │   # This proposed file tree. Bug and verification checks compare code placement against it.
 ├── README.md
