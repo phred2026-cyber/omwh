@@ -54,6 +54,8 @@ omwh/
 │   # Installation, commands, full config reference, and gameplay behavior.
 ├── CHANGELOG.md
 ├── LICENSE
+├── .gitignore
+│   # Keeps Gradle output, IDE state, and local runtime files out of source.
 ├── build.gradle
 │   # Fabric Loom build and all verification tasks.
 ├── gradle.properties
@@ -61,7 +63,13 @@ omwh/
 ├── settings.gradle
 ├── gradlew
 ├── gradlew.bat
-└── gradle/wrapper/
-    ├── gradle-wrapper.jar
-    └── gradle-wrapper.properties
+└── gradle/
+    ├── minecraft/
+    │   ├── 26.2-custom.json
+    │   │   # Loom-compatible Minecraft 26.2 metadata used by the build.
+    │   └── identity-official-26.2.jar
+    │       # Pinned official-name mapping input used by the build.
+    └── wrapper/
+        ├── gradle-wrapper.jar
+        └── gradle-wrapper.properties
 ```
