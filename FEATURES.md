@@ -2,7 +2,7 @@
 
 ## Status
 
-This file preserves the product behavior required for OMWH's next implementation. The current branch is structural groundwork only: it compiles the owners named in `ARCHITECTURE.md`, but it does not register `/home` or `/spawn` or perform teleports. The four test files establish the accepted suite layout; they do not yet contain executable gameplay tests. Do not deploy this groundwork as a working release.
+This file is the accepted gameplay contract for the in-development OMWH rewrite. Its `1.1.3-dev` artifact is not a release candidate and must not be published or installed as the playable `1.1.3` release. The eight production owners and four grouped regression files are defined in `ARCHITECTURE.md`.
 
 ## Runtime scope
 
@@ -27,7 +27,7 @@ This file preserves the product behavior required for OMWH's next implementation
 
 - The configured spawn command defaults to `/spawn`.
 - The command uses the spawn belonging to the player's current dimension; it does not route every player to the Overworld.
-- In the End, the destination policy uses the dimension's obsidian spawn platform behavior.
+- In the End, OMWH recreates Minecraft 26.2's obsidian arrival platform at the built-in End spawn point and places the group at the platform feet position with vanilla's west-facing orientation. It does not run the ordinary spawn search there.
 - Outside the End-specific rule, OMWH searches deterministically near the current world's spawn for the nearest accepted feet position. The search is bounded to a horizontal radius of 64 blocks and vertical offsets from 2 blocks below through 10 blocks above spawn. If reading the world's spawn throws, the released locator uses `(0, 64, 0)` as its fallback search center.
 - The destination must support and contain the square footprint derived from the player or root vehicle size, with enough clear height for that root.
 - If the mounted group cannot fit but an unmounted player could, the command explains that the vehicle is too large and asks the player to dismount. If no safe destination exists, it reports the configured unsafe-spawn failure.
@@ -58,15 +58,15 @@ This file preserves the product behavior required for OMWH's next implementation
 Cooldown state is keyed by player UUID and owned only by `Cooldowns`.
 
 - Regular cooldown: defaults to 30 seconds, is configurable and independently enabled, and begins only after a successful `/home` or `/spawn` teleport.
-- PvP cooldown: defaults to 45 seconds, is configurable and independently enabled, and applies to both player attacker and player victim when player-versus-player damage is allowed.
-- Damage cooldown: defaults to 10 seconds, is configurable and independently enabled, and applies to a player damaged by a non-player source when that damage is allowed.
+- PvP cooldown: defaults to 45 seconds, is configurable and independently enabled, and applies to both player attacker and player victim when incoming player-versus-player damage reaches OMWH's `ALLOW_DAMAGE` callback and OMWH allows it to continue.
+- Damage cooldown: defaults to 10 seconds, is configurable and independently enabled, and applies to a player when incoming non-player damage reaches OMWH's `ALLOW_DAMAGE` callback and OMWH allows it to continue.
 - Join cooldown: defaults to 30 seconds and applies when a player joins. A value of `0` disables it.
 - A disabled cooldown or a duration of `0` does not block teleporting.
 - When event cooldowns overlap, the longer unexpired event restriction wins; a shorter event cannot reduce an existing longer restriction.
 - Blocking priority and message selection are PvP, damage, join, then regular. Remaining time replaces `{time}` in the selected message.
 - Failed or denied command attempts do not begin the regular cooldown.
 - Cooldowns live only in process memory. UUID keys let active restrictions survive player-object replacement, respawn, and reconnect while the server process remains alive; expired entries are removed lazily when queried.
-- PvP and other damage restrictions are recorded from Fabric's `ALLOW_DAMAGE` callback, which then allows the damage event to continue.
+- PvP and other damage restrictions are recorded from Fabric's `ALLOW_DAMAGE` callback when OMWH allows the incoming damage event to continue. This callback runs before mitigation and does not observe the final event result: another listener may later cancel the damage, but the OMWH cooldown has already begun.
 
 ## Messages and effects
 
@@ -81,7 +81,7 @@ Cooldown state is keyed by player UUID and owned only by `Cooldowns`.
 
 ## Configuration
 
-`OmwhConfig` is the only owner of `config/omwh.json`. A missing file creates a complete default file. Existing files are loaded permissively: omitted fields retain their built-in defaults, while an empty file or an I/O failure logs the problem and uses defaults for that server run. Malformed JSON or incompatible value types propagate as startup failures. Failure to write the initial default file is logged.
+`OmwhConfig` is the only owner of `config/omwh.json`. A missing file creates a complete default file. Existing files remain permissive about omitted fields and unknown keys: omitted fields retain their built-in defaults and unknown keys are ignored. Known fields must use their documented JSON primitive type; quoted numbers, quoted booleans, nulls, and other incompatible values fail startup instead of being coerced. An empty file or an I/O failure logs the problem and uses defaults for that server run. Malformed JSON propagates as a startup failure. Failure to write the initial default file is logged.
 
 | Field | Default | Contract |
 |---|---:|---|
@@ -107,7 +107,7 @@ Cooldown state is keyed by player UUID and owned only by `Cooldowns`.
 | `joinCooldownMessage` | `"§cYou must wait {time} seconds after joining before teleporting!"` | Join block text |
 | `regularCooldownMessage` | `"§cYou recently teleported! Please wait {time} seconds before trying again."` | Regular block text |
 
-The released configuration path does not perform strict whole-document schema validation. Tight validation of unknown, duplicate, incomplete, coerced, or otherwise invalid values is separate future work, not part of this preserved contract.
+The configuration path is not strict whole-document schema validation: unknown keys remain allowed and omitted keys retain defaults. It is strict only about the JSON primitive types and domain validation of known fields.
 
 ## Failure contract
 

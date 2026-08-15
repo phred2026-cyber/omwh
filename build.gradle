@@ -50,6 +50,27 @@ sourceSets {
 	}
 }
 
+['configTest': 'ConfigTest',
+ 'commandsAndCooldownsTest': 'CommandsAndCooldownsTest',
+ 'destinationsTest': 'DestinationsTest',
+ 'teleportServiceTest': 'TeleportServiceTest'].each { taskName, className ->
+	tasks.register(taskName, JavaExec) {
+		group = 'verification'
+		dependsOn testClasses
+		classpath = sourceSets.test.runtimeClasspath
+		mainClass = "xyz.pyrehaven.omwh.${className}"
+		workingDir = layout.buildDirectory.dir("test-runs/${taskName}")
+		doFirst { workingDir.mkdirs() }
+	}
+}
+
+tasks.register('regressionTest') {
+	group = 'verification'
+	dependsOn configTest, commandsAndCooldownsTest, destinationsTest, teleportServiceTest
+}
+
+check.dependsOn regressionTest
+
 tasks.named('test') {
 	failOnNoDiscoveredTests = false
 }

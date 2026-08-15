@@ -2,8 +2,8 @@
   "schemaVersion": 1,
   "id": "omwh",
   "version": "${version}",
-  "name": "OMWH (structural groundwork)",
-  "description": "Non-deployable groundwork for the next OMWH implementation. Commands and teleport gameplay are intentionally absent.",
+  "name": "OMWH",
+  "description": "Server-side same-dimension /home and /spawn commands with mounted passenger support.",
   "authors": [
     "PyreHaven"
   ],

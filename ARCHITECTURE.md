@@ -1,5 +1,7 @@
 # OMWH Structure
 
+This tree describes the in-development rewrite. Artifacts remain marked `1.1.3-dev` and are not release-safe until runtime verification and release selection are complete.
+
 `/home` and `/spawn` differ only in destination policy. `Commands`, `Cooldowns`,
 `DestinationSafety`, and `TeleportService` are their shared owners for command flow, cooldown state,
 placement safety, and teleport mutation.
