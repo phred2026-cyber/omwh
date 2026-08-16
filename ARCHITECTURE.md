@@ -33,8 +33,9 @@ omwh/
 │   │   │   │   # Shared placement owner for chunks, build limits, world border, support, hazards,
 │   │   │   │   # fluids, collision, and the required player or mounted-tree footprint.
 │   │   │   └── TeleportService.java
-│   │   │       # Sole entity-mutation owner. Captures the root/passenger tree, performs one
-│   │   │       # same-dimension recursive root teleport, and verifies attachments afterward.
+│   │   │       # Sole entity-mutation owner. Captures UUIDs, exact passenger edges, source validity,
+│   │   │       # and player identities; performs one same- or cross-dimension recursive root
+│   │   │       # teleport; then reconciles the complete returned tree before reporting success.
 │   │   └── resources/
 │   │       ├── fabric.mod.json
 │   │       │   # Fabric metadata, dependencies, version, icon, and Omwh entrypoint.
