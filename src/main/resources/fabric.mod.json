@@ -3,7 +3,7 @@
   "id": "omwh",
   "version": "${version}",
   "name": "OMWH",
-  "description": "Server-side same-dimension /home and /spawn commands with mounted passenger support.",
+  "description": "Server-side configurable /home and /spawn commands with cross-dimension vehicle and passenger support.",
   "authors": [
     "PyreHaven"
   ],

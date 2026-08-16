@@ -2,10 +2,10 @@
 
 > **Development rewrite:** artifacts built from this branch are marked `1.1.3-dev`. They are not the playable `1.1.3` release and are not ready for publication or production installation.
 
-OMWH adds `/home` and `/spawn` to Fabric servers without turning them into cross-dimension warps.
+OMWH adds configurable `/home` and `/spawn` teleporting to Fabric servers.
 
-- `/home` returns you to a valid bed or respawn anchor in your current dimension.
-- `/spawn` finds safe ground near the current dimension's spawn.
+- `/home` returns you to a valid bed or respawn anchor, including one in another dimension when the server allows it.
+- `/spawn` uses separately controlled Overworld, Nether, and End destinations.
 - `/home --force` and `/spawn --force` deliberately use each command's raw destination when you
   accept the risk. They still enforce player-only use, cooldowns, and each command's applicable home
   and dimension rules.
@@ -19,10 +19,11 @@ Built by [PyreHaven](https://pyrehaven.xyz).
 
 `/home` uses Minecraft's normal placement around your respawn point, then refuses fluids and unsafe
 hazards such as lava at that position. If you are mounted and the vehicle cannot fit beside an
-uncovered bed, OMWH may place the group directly above it. Invalid, blocked, unsafe, or
-cross-dimension homes are refused.
+uncovered bed, OMWH may place the group directly above it. Invalid, blocked, or unsafe homes are refused. Cross-dimension homes are accepted only when `enableCrossDimensionTeleport` is enabled.
 
-`/spawn` searches near the spawn point for solid ground with enough clear space for the player or vehicle. In the End, it recreates Minecraft 26.2's built-in obsidian arrival platform and uses the vanilla feet position and orientation instead of searching.
+`/spawn` uses the current dimension's destination when that destination is enabled. Enabled Nether and End destinations win even when cross-dimension teleporting is disabled. If Nether or End spawn is disabled, the command can use Overworld spawn only when both cross-dimension teleporting and Overworld spawn are enabled. A disabled Overworld destination is denied rather than redirected elsewhere.
+
+Outside the End, `/spawn` searches near the selected world's spawn for solid ground with enough clear space for the player or vehicle. When the End is selected, it recreates Minecraft 26.2's built-in obsidian arrival platform and uses the vanilla feet position and orientation instead of searching.
 
 The literal `--force` form skips only destination-safety checks and teleports to the command's raw
 destination. Server owners can remove both force forms by setting `enableForceOverride` to `false`.
@@ -54,6 +55,10 @@ Edit `config/omwh.json` after the first launch.
 | `playTeleportSound` | `true` | Play a sound after destination acceptance, before mutation |
 | `spawnTeleportParticles` | `true` | Show particles after destination acceptance, before mutation |
 | `enableForceOverride` | `true` | Register `/home --force` and `/spawn --force` |
+| `enableCrossDimensionTeleport` | `true` | Allow valid cross-dimension homes and eligible Nether/End-to-Overworld spawn routes |
+| `enableOverworldSpawn` | `true` | Allow the Overworld spawn destination |
+| `enableNetherSpawn` | `true` | Allow Nether spawn while the player is in the Nether |
+| `enableEndSpawn` | `true` | Allow the End arrival point and platform while the player is in the End |
 | Message fields | See config | Text shown to players; supports Minecraft color codes and `{time}` |
 
 Set a cooldown to `0` to disable it. Damage cooldowns begin in Fabric's `ALLOW_DAMAGE` callback when OMWH allows the incoming event to continue. That callback runs before mitigation; another listener may later cancel the event, and OMWH does not claim the damage was finally applied.

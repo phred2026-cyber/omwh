@@ -18,6 +18,7 @@ public final class Commands {
     private static final Logger LOGGER = LoggerFactory.getLogger("omwh");
     private static final String INTERNAL_ERROR = "§cInternal error executing /%s. Check server log.";
     private static final String VEHICLE_TOO_LARGE = "§cYour vehicle is too big. Please dismount and try again.";
+    static final String SPAWN_DISABLED = "§cSpawn teleporting is disabled for this dimension.";
     private final OmwhConfig config;
     private final Cooldowns cooldowns;
 
@@ -63,7 +64,8 @@ public final class Commands {
         if (player == null) return 0;
         try {
             if (!admit(player)) return 0;
-            HomeDestination.Result destination = HomeDestination.find(player, force);
+            HomeDestination.Result destination = HomeDestination.find(
+                    player, force, config.enableCrossDimensionTeleport);
             switch (destination.outcome()) {
                 case NO_HOME -> send(player, config.noHomepointMessage);
                 case CROSS_DIMENSION -> send(player, config.crossDimensionMessage);
@@ -86,7 +88,16 @@ public final class Commands {
                 send(player, "§cCannot determine your current world.");
                 return 0;
             }
-            SpawnDestination.Result destination = SpawnDestination.find(player, level, force);
+            SpawnDestination.Target target = SpawnDestination.route(SpawnDestination.dimension(level),
+                    config.enableCrossDimensionTeleport, config.enableOverworldSpawn,
+                    config.enableNetherSpawn, config.enableEndSpawn);
+            if (target == SpawnDestination.Target.DISABLED) {
+                send(player, SPAWN_DISABLED);
+                return 0;
+            }
+            ServerLevel selectedLevel = target == SpawnDestination.Target.OVERWORLD
+                    ? level.getServer().overworld() : level;
+            SpawnDestination.Result destination = SpawnDestination.find(player, selectedLevel, force);
             switch (destination.outcome()) {
                 case NO_WORLD_SPAWN -> send(player, "§cCannot determine world spawn.");
                 case VEHICLE_TOO_LARGE -> send(player, VEHICLE_TOO_LARGE);
@@ -111,8 +122,8 @@ public final class Commands {
         TeleportService.Result[] result = new TeleportService.Result[1];
         return completeTeleport(
                 () -> playEffects(player),
-                () -> { if (!home) DestinationSafety.loadDestinationChunks(
-                        destination.level(), destination.position()); },
+                () -> DestinationSafety.loadDestinationChunks(
+                        destination.level(), destination.position()),
                 () -> {
                     result[0] = TeleportService.teleport(player, destination);
                     return result[0].success();

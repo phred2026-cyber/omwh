@@ -15,8 +15,9 @@ public final class CommandsAndCooldownsTest {
         cooldownPolicyUsesUuidExpiryAndPriority();
         forceSyntaxFollowsTheServerSetting();
         commandFeedbackUsesSpecificMessagesColorsAndPassengerDestination();
+        disabledSpawnFeedbackDoesNotClaimAWorldIsMissing();
         acceptedCommandOperationsRunInReleasedOrder();
-        System.out.println("CommandsAndCooldownsTest PASS (4 behavior groups)");
+        System.out.println("CommandsAndCooldownsTest PASS (5 behavior groups)");
     }
 
     private static void forceSyntaxFollowsTheServerSetting() {
@@ -88,6 +89,13 @@ public final class CommandsAndCooldownsTest {
                 .equals("§cWait 3"), "ampersand colors");
         check(Commands.passengerMessage("Alex", true).contains("their home"), "home passenger message");
         check(Commands.passengerMessage("Alex", false).endsWith("to spawn."), "spawn passenger message");
+    }
+
+    private static void disabledSpawnFeedbackDoesNotClaimAWorldIsMissing() {
+        String message = Commands.SPAWN_DISABLED.toLowerCase();
+        check(message.contains("disabled"), "disabled spawn has an explicit policy message");
+        check(!message.contains("missing") && !message.contains("cannot determine"),
+                "disabled spawn is not reported as a missing world");
     }
 
     private static void acceptedCommandOperationsRunInReleasedOrder() {

@@ -9,12 +9,13 @@ public final class ConfigTest {
         try {
             missingConfigCreatesCompleteDefaults(root.resolve("missing/omwh.json"));
             existingConfigKeepsDefaultsForOmittedFields(root.resolve("partial.json"));
+            dimensionSettingsDefaultWriteAndKeepDefaultsWhenOmitted(root);
             emptyAndUnreadableConfigsUseDefaults(root);
             malformedAndCoercedKnownTypesFailStartup(root);
             unknownFieldsRemainPermissive(root.resolve("unknown.json"));
             initialWriteFailureStillUsesDefaults(root);
             validationRejectsInvalidCommandsAndDurations();
-            System.out.println("ConfigTest PASS (7 behaviors)");
+            System.out.println("ConfigTest PASS (8 behaviors)");
         } finally {
             deleteTree(root);
         }
@@ -38,6 +39,34 @@ public final class ConfigTest {
         check(config.homeCommand.equals("return"), "configured command");
         check(config.regularCooldownSeconds == 7, "configured cooldown");
         check(config.spawnCommand.equals("spawn") && config.pvpCooldownSeconds == 45, "omitted defaults");
+    }
+
+    private static void dimensionSettingsDefaultWriteAndKeepDefaultsWhenOmitted(Path root) throws Exception {
+        Path defaultsPath = root.resolve("dimension-defaults.json");
+        OmwhConfig defaults = OmwhConfig.load(defaultsPath);
+        check(defaults.enableCrossDimensionTeleport, "cross-dimension teleport enabled by default");
+        check(defaults.enableOverworldSpawn, "Overworld spawn enabled by default");
+        check(defaults.enableNetherSpawn, "Nether spawn enabled by default");
+        check(defaults.enableEndSpawn, "End spawn enabled by default");
+        String json = Files.readString(defaultsPath);
+        for (String field : new String[]{"enableCrossDimensionTeleport", "enableOverworldSpawn",
+                "enableNetherSpawn", "enableEndSpawn"}) {
+            check(json.contains("\"" + field + "\": true"), "default file contains " + field);
+        }
+
+        Path omittedPath = root.resolve("dimension-omitted.json");
+        Files.writeString(omittedPath, "{\"homeCommand\":\"return\"}");
+        OmwhConfig omitted = OmwhConfig.load(omittedPath);
+        check(omitted.enableCrossDimensionTeleport && omitted.enableOverworldSpawn
+                        && omitted.enableNetherSpawn && omitted.enableEndSpawn,
+                "existing configs retain enabled dimension defaults");
+
+        for (String field : new String[]{"enableCrossDimensionTeleport", "enableOverworldSpawn",
+                "enableNetherSpawn", "enableEndSpawn"}) {
+            Path wrongType = root.resolve(field + "-wrong-type.json");
+            Files.writeString(wrongType, "{\"" + field + "\":\"false\"}");
+            expectFailure(() -> OmwhConfig.load(wrongType), field + " quoted boolean");
+        }
     }
 
     private static void emptyAndUnreadableConfigsUseDefaults(Path root) throws Exception {

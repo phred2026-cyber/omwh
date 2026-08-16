@@ -12,9 +12,10 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public final class DestinationsTest {
     public static void main(String[] args) {
-        homePolicyAllowsOnlyAcceptedSameDimensionRespawnAndOneBedAlternate();
+        homePolicyAllowsOnlyAcceptedRespawnsAndOneBedAlternate();
         unmountedHomeRejectsHazardsUnlessForceWasRequested();
-        forceSpawnUsesTheRawWorldDestination();
+        spawnRoutingHonorsThreePoliciesAndCrossingBoundary();
+        forceUsesRawDestinationsWithoutChangingAdmission();
         mountedHomeClearanceUsesRootMarginsAndOnlyBedPolicyExemption();
         mountedHazardsDoNotMasqueradeAsVehicleClearanceFailures();
         endPolicyUsesVanillaPlatformPlacement();
@@ -23,14 +24,20 @@ public final class DestinationsTest {
         spawnFailureDistinguishesOversizedVehicle();
         collisionOwnersIncludeShellAndEveryInvolvedChunk();
         safetyOwnsFootprintsHazardsAndFiveByFiveChunkPreparation();
-        System.out.println("DestinationsTest PASS (11 behavior groups)");
+        System.out.println("DestinationsTest PASS (12 behavior groups)");
     }
 
-    private static void homePolicyAllowsOnlyAcceptedSameDimensionRespawnAndOneBedAlternate() {
-        check(HomeDestination.decide(true, true) == HomeDestination.Decision.NO_HOME, "missing home");
-        check(HomeDestination.decide(false, false) == HomeDestination.Decision.CROSS_DIMENSION,
-                "cross-dimension home");
-        check(HomeDestination.decide(false, true) == HomeDestination.Decision.ACCEPT, "same-dimension home");
+    private static void homePolicyAllowsOnlyAcceptedRespawnsAndOneBedAlternate() {
+        check(HomeDestination.decide(true, true, true, true) == HomeDestination.Decision.NO_HOME,
+                "missing home");
+        check(HomeDestination.decide(false, false, true, true) == HomeDestination.Decision.NO_HOME,
+                "unavailable saved-home dimension cannot become default spawn");
+        check(HomeDestination.decide(false, true, false, false) == HomeDestination.Decision.CROSS_DIMENSION,
+                "cross-dimension home denied when crossing is disabled");
+        check(HomeDestination.decide(false, true, false, true) == HomeDestination.Decision.ACCEPT,
+                "cross-dimension home accepted when crossing is enabled");
+        check(HomeDestination.decide(false, true, true, false) == HomeDestination.Decision.ACCEPT,
+                "same-dimension home does not require crossing");
         check(HomeDestination.mayTryAboveBed(true, true, false, false), "non-forced mounted bed");
         check(!HomeDestination.mayTryAboveBed(true, true, false, true), "covered bed");
         check(!HomeDestination.mayTryAboveBed(false, true, false, false), "unmounted player");
@@ -43,12 +50,72 @@ public final class DestinationsTest {
         check(DestinationSafety.isUnsafeHomeCell(false, "block.minecraft.lava"), "home lava hazard");
         check(DestinationSafety.isUnsafeHomeCell(false, "block.minecraft.cactus"), "home cactus hazard");
         check(!DestinationSafety.isUnsafeHomeCell(false, "block.minecraft.stone"), "ordinary home block");
-        check(!HomeDestination.mayUseRespawn(false, false), "unsafe vanilla respawn denied");
-        check(HomeDestination.mayUseRespawn(false, true), "force bypasses only destination safety");
-        check(HomeDestination.mayUseRespawn(true, false), "safe vanilla respawn accepted");
+        AtomicInteger normalChecks = new AtomicInteger();
+        check(!HomeDestination.acceptUnmounted(false, () -> {
+            normalChecks.incrementAndGet();
+            return false;
+        }), "unsafe vanilla respawn denied");
+        check(normalChecks.get() == 1, "normal home evaluates destination safety once");
+
+        AtomicInteger forcedChecks = new AtomicInteger();
+        check(HomeDestination.acceptUnmounted(true, () -> {
+            forcedChecks.incrementAndGet();
+            return false;
+        }), "force bypasses destination safety");
+        check(forcedChecks.get() == 0, "force never reads destination safety");
     }
 
-    private static void forceSpawnUsesTheRawWorldDestination() {
+    private static void spawnRoutingHonorsThreePoliciesAndCrossingBoundary() {
+        for (boolean cross : List.of(false, true)) {
+            for (boolean overworld : List.of(false, true)) {
+                for (boolean nether : List.of(false, true)) {
+                    for (boolean end : List.of(false, true)) {
+                        checkRoute(SpawnDestination.Dimension.OVERWORLD,
+                                overworld ? SpawnDestination.Target.CURRENT : SpawnDestination.Target.DISABLED,
+                                cross, overworld, nether, end);
+                        checkRoute(SpawnDestination.Dimension.NETHER,
+                                nether ? SpawnDestination.Target.CURRENT
+                                        : cross && overworld ? SpawnDestination.Target.OVERWORLD
+                                        : SpawnDestination.Target.DISABLED,
+                                cross, overworld, nether, end);
+                        checkRoute(SpawnDestination.Dimension.END,
+                                end ? SpawnDestination.Target.CURRENT
+                                        : cross && overworld ? SpawnDestination.Target.OVERWORLD
+                                        : SpawnDestination.Target.DISABLED,
+                                cross, overworld, nether, end);
+                    }
+                }
+            }
+        }
+
+        checkRoute(SpawnDestination.Dimension.NETHER, SpawnDestination.Target.CURRENT,
+                false, false, true, false);
+        checkRoute(SpawnDestination.Dimension.END, SpawnDestination.Target.CURRENT,
+                false, false, false, true);
+        checkRoute(SpawnDestination.Dimension.NETHER, SpawnDestination.Target.DISABLED,
+                true, false, false, true);
+        checkRoute(SpawnDestination.Dimension.END, SpawnDestination.Target.OVERWORLD,
+                true, true, true, false);
+        checkRoute(SpawnDestination.Dimension.OTHER, SpawnDestination.Target.DISABLED,
+                true, true, true, true);
+    }
+
+    private static void checkRoute(SpawnDestination.Dimension current, SpawnDestination.Target expected,
+                                   boolean cross, boolean overworld, boolean nether, boolean end) {
+        check(SpawnDestination.route(current, cross, overworld, nether, end) == expected,
+                "spawn route " + current + " cross=" + cross + " overworld=" + overworld
+                        + " nether=" + nether + " end=" + end);
+    }
+
+    private static void forceUsesRawDestinationsWithoutChangingAdmission() {
+        check(HomeDestination.decide(false, true, false, false) == HomeDestination.Decision.CROSS_DIMENSION,
+                "force cannot bypass cross-dimension home admission");
+        check(SpawnDestination.route(SpawnDestination.Dimension.NETHER,
+                        false, true, false, true) == SpawnDestination.Target.DISABLED,
+                "force cannot bypass cross-dimension spawn admission");
+        check(SpawnDestination.route(SpawnDestination.Dimension.END,
+                        false, false, true, true) == SpawnDestination.Target.CURRENT,
+                "enabled End spawn remains selected without cross-dimension admission");
         check(SpawnDestination.rawPosition(new BlockPos(12, 70, -4)).equals(new Vec3(12.5, 70, -3.5)),
                 "raw spawn is the authoritative block-center feet position");
     }

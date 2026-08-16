@@ -9,18 +9,19 @@ This file is the accepted gameplay contract for the in-development OMWH rewrite.
 - OMWH is server-authoritative. It must work on dedicated Fabric servers and integrated singleplayer servers.
 - Players do not need OMWH on their clients. There is no client-only gameplay owner or client entrypoint.
 - Both commands are player commands. Non-player command sources cannot invoke teleport behavior.
-- OMWH never turns either command into a cross-dimension warp. The destination world is always the player's current dimension.
+- Server owners decide whether valid `/home` destinations and eligible `/spawn` routes may cross dimensions.
 
 ## `/home`
 
 - The configured home command defaults to `/home`.
 - `/home --force` uses the same authoritative vanilla respawn position while deliberately bypassing
   destination-safety checks. It remains subject to player-source, cooldown, missing-home, and
-  same-dimension rules, and exists only while `enableForceOverride` is enabled.
+  dimension-admission rules, and exists only while `enableForceOverride` is enabled.
 - A home exists only when Minecraft has a valid configured respawn point for the player: a bed, a charged respawn anchor, or a forced respawn point.
 - OMWH asks Minecraft for its normal respawn placement without consuming a respawn-anchor charge.
 - A missing or destroyed respawn point is not replaced with world spawn.
-- A respawn transition into another dimension is refused. The player must enter that dimension normally before using the command.
+- A valid respawn transition into another dimension is accepted only while `enableCrossDimensionTeleport` is enabled. Otherwise it is refused with the configured cross-dimension message.
+- `/home` never substitutes Nether spawn, End spawn, or Overworld spawn for a missing or destroyed home, or for a cross-dimension home denied by the setting.
 - Unmounted players use Minecraft's accepted respawn position only when its occupied space and
   supporting layer contain no fluid or configured hazard such as lava, fire, magma, cactus, sweet
   berry bush, wither rose, or powder snow.
@@ -31,13 +32,15 @@ This file is the accepted gameplay contract for the in-development OMWH rewrite.
 ## `/spawn`
 
 - The configured spawn command defaults to `/spawn`.
-- `/spawn --force` teleports to the current dimension's raw spawn block-center feet position without
-  running the ordinary safe-location search. In the End it uses the built-in End arrival position and
+- `/spawn --force` uses the raw spawn block-center feet position of the destination selected by the same routing settings as normal `/spawn`, without running the ordinary safe-location search. In the End it uses the built-in End arrival position and
   platform behavior. It remains subject to player-source and cooldown rules, and exists only while
   `enableForceOverride` is enabled.
-- The command uses the spawn belonging to the player's current dimension; it does not route every player to the Overworld.
+- In the Overworld, `/spawn` uses Overworld spawn only while `enableOverworldSpawn` is enabled. If it is disabled, the command is denied without selecting another dimension.
+- In the Nether, enabled `enableNetherSpawn` always selects Nether spawn, regardless of `enableCrossDimensionTeleport`.
+- In the End, enabled `enableEndSpawn` always selects the End arrival point and platform, regardless of `enableCrossDimensionTeleport`.
+- If Nether or End spawn is disabled, `/spawn` selects Overworld spawn only when both `enableCrossDimensionTeleport` and `enableOverworldSpawn` are enabled. Otherwise it reports that spawn teleporting is disabled for that dimension and performs no mutation.
 - In the End, OMWH recreates Minecraft 26.2's obsidian arrival platform at the built-in End spawn point and places the group at the platform feet position with vanilla's west-facing orientation. It does not run the ordinary spawn search there.
-- Outside the End-specific rule, OMWH searches deterministically near the current world's spawn for the nearest accepted feet position. The search is bounded to a horizontal radius of 64 blocks and vertical offsets from 2 blocks below through 10 blocks above spawn. If reading the world's spawn throws, the released locator uses `(0, 64, 0)` as its fallback search center.
+- Outside the End-specific rule, OMWH searches deterministically near the selected world's spawn for the nearest accepted feet position. The search is bounded to a horizontal radius of 64 blocks and vertical offsets from 2 blocks below through 10 blocks above spawn. If reading the selected world's spawn throws, the released locator uses `(0, 64, 0)` as its fallback search center.
 - The destination must support and contain the square footprint derived from the player or root vehicle size, with enough clear height for that root.
 - If the mounted group cannot fit but an unmounted player could, the command explains that the vehicle is too large and asks the player to dismount. If no safe destination exists, it reports the configured unsafe-spawn failure.
 
@@ -52,7 +55,7 @@ checks and no other admission rule.
 - Mounted `/home` checks the translated root-vehicle bounds, the required horizontal and upper clearance margins, block collision, fluids and hazards in the vehicle space or supporting layer, the configured-bed exemption, and the world border. Passenger hitboxes do not enlarge this clearance volume.
 - `/spawn` requires full-block support beneath the complete square root footprint and clear occupied blocks through the required root height.
 - `/spawn` rejects fluids and hazardous blocks, including fire, lava, magma, cactus, sweet berry bushes, wither roses, and powder snow.
-- After selecting a `/spawn` destination, OMWH loads the fixed five-by-five chunk area around it before teleport mutation.
+- After selecting any accepted home or spawn destination, OMWH loads the fixed five-by-five chunk area around it before teleport mutation.
 - Released placement checks do not reject external entities. Self-collision and broader passenger-tree collision rules are decisions for later feature work, not preserved behavior.
 - Safety decisions are deterministic. An unsafe candidate is a denial, not permission to use an unchecked fallback.
 
@@ -60,7 +63,7 @@ checks and no other admission rule.
 
 - Teleporting a mounted player moves the root vehicle and its complete recursive passenger tree, including non-player entities and other player passengers.
 - `TeleportService` captures entity identity and every parent-child attachment before mutation.
-- Same-dimension movement is performed by one recursive teleport of the root entity. OMWH does not manually dismount, move, and remount the tree.
+- Same- and cross-dimension movement is performed by one recursive teleport of the root entity. OMWH does not manually dismount, move, and remount the tree.
 - Destination placement uses feet coordinates and preserves the captured attachment graph. A successful move clears carried root velocity.
 - A null teleport result, a runtime exception during mutation, or any changed attachment after mutation is logged by `TeleportService` and returned to the command as teleport failure. The released behavior does not promise rollback after mutation has started.
 - Player passengers receive a message naming the command user and whether the group traveled to home or spawn.
@@ -109,6 +112,10 @@ Cooldown state is keyed by player UUID and owned only by `Cooldowns`.
 | `playTeleportSound` | `true` | Enables the pre-mutation teleport-attempt sound |
 | `spawnTeleportParticles` | `true` | Enables pre-mutation teleport-attempt particles |
 | `enableForceOverride` | `true` | Registers the literal `--force` form for both commands |
+| `enableCrossDimensionTeleport` | `true` | Allows valid cross-dimension homes and eligible Nether/End-to-Overworld spawn routes |
+| `enableOverworldSpawn` | `true` | Allows Overworld spawn as the current or selected destination |
+| `enableNetherSpawn` | `true` | Allows Nether spawn while the player is in the Nether |
+| `enableEndSpawn` | `true` | Allows the End arrival point and platform while the player is in the End |
 | `homeSuccessMessage` | `"§aTeleported to your home!"` | `/home` success text |
 | `spawnSuccessMessage` | `"§aTeleported to world spawn!"` | `/spawn` success text |
 | `noHomepointMessage` | `"§cYou don't have a spawn point set!"` | Missing or invalid home text |
@@ -126,7 +133,7 @@ The configuration path is not strict whole-document schema validation: unknown k
 
 - Expected denials use the most specific player-facing message and return command failure without teleport mutation.
 - Force bypasses destination safety only. It does not bypass command-source, cooldown, missing-home,
-  cross-dimension, destination-world, or teleport-mutation failure handling.
+  cross-dimension admission, disabled spawn settings, destination-world, or teleport-mutation failure handling.
 - Destination discovery and the checks required by that command complete before teleport mutation begins.
 - No command catches an invariant violation and retries through another destination or mutation path.
 - Unexpected command exceptions are logged with context, send the command user an internal-error message, and return command failure.

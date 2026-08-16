@@ -8,6 +8,8 @@ import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.portal.TeleportTransition;
 import net.minecraft.world.phys.Vec3;
 
+import java.util.function.BooleanSupplier;
+
 public final class HomeDestination {
     enum Decision { ACCEPT, NO_HOME, CROSS_DIMENSION }
     enum Outcome { ACCEPT, NO_HOME, CROSS_DIMENSION, VEHICLE_TOO_LARGE, UNSAFE }
@@ -16,9 +18,10 @@ public final class HomeDestination {
 
     private HomeDestination() { }
 
-    static Decision decide(boolean missingRespawnBlock, boolean sameDimension) {
-        if (missingRespawnBlock) return Decision.NO_HOME;
-        if (!sameDimension) return Decision.CROSS_DIMENSION;
+    static Decision decide(boolean missingRespawnBlock, boolean savedLevelAvailable, boolean sameDimension,
+                           boolean crossDimensionEnabled) {
+        if (missingRespawnBlock || !savedLevelAvailable) return Decision.NO_HOME;
+        if (!sameDimension && !crossDimensionEnabled) return Decision.CROSS_DIMENSION;
         return Decision.ACCEPT;
     }
 
@@ -26,8 +29,8 @@ public final class HomeDestination {
         return mounted && bed && !forced && !covered;
     }
 
-    static boolean mayUseRespawn(boolean safe, boolean force) {
-        return safe || force;
+    static boolean acceptUnmounted(boolean force, BooleanSupplier safe) {
+        return force || safe.getAsBoolean();
     }
 
     static MountedChoice chooseMounted(DestinationSafety.HomeFit exact, boolean mayTryFallback,
@@ -40,23 +43,26 @@ public final class HomeDestination {
         return MountedChoice.VEHICLE_TOO_LARGE;
     }
 
-    static Result find(ServerPlayer player, boolean force) {
+    static Result find(ServerPlayer player, boolean force, boolean crossDimensionEnabled) {
         var respawnConfig = player.getRespawnConfig();
         if (respawnConfig == null) return new Result(Outcome.NO_HOME, null);
+
+        if (!(player.level() instanceof ServerLevel current)) return new Result(Outcome.UNSAFE, null);
+        ServerLevel savedLevel = current.getServer().getLevel(respawnConfig.respawnData().dimension());
+        if (savedLevel == null) return new Result(Outcome.NO_HOME, null);
 
         // false preserves respawn-anchor charges; vanilla remains the authority for respawn placement.
         TeleportTransition respawn = player.findRespawnPositionAndUseSpawnBlock(
                 false, TeleportTransition.DO_NOTHING);
-        if (!(player.level() instanceof ServerLevel current)) return new Result(Outcome.UNSAFE, null);
-        Decision decision = decide(respawn.missingRespawnBlock(),
-                current.dimension().equals(respawn.newLevel().dimension()));
+        Decision decision = decide(respawn.missingRespawnBlock(), true,
+                current.dimension().equals(respawn.newLevel().dimension()), crossDimensionEnabled);
         if (decision == Decision.NO_HOME) return new Result(Outcome.NO_HOME, null);
         if (decision == Decision.CROSS_DIMENSION) return new Result(Outcome.CROSS_DIMENSION, null);
 
         Entity root = player.getRootVehicle();
         if (root == player) {
-            if (!mayUseRespawn(DestinationSafety.unmountedHomeFits(
-                    player, respawn.newLevel(), respawn.position()), force)) {
+            if (!acceptUnmounted(force, () -> DestinationSafety.unmountedHomeFits(
+                    player, respawn.newLevel(), respawn.position()))) {
                 return new Result(Outcome.UNSAFE, null);
             }
             return new Result(Outcome.ACCEPT, new DestinationSafety.Prepared(respawn.newLevel(),

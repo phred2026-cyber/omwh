@@ -24,11 +24,11 @@ omwh/
 │   │   │   │   # Sole owner of regular, PvP, damage, and join cooldown state plus the Fabric
 │   │   │   │   # callbacks that update it. Commands receive one blocking result from this file.
 │   │   │   ├── HomeDestination.java
-│   │   │   │   # /home-only policy: same-dimension vanilla bed/anchor/forced-home placement,
-│   │   │   │   # mounted clearance, and the single uncovered-bed above-bed fallback.
+│   │   │   │   # /home-only policy: vanilla saved-respawn admission and placement across allowed
+│   │   │   │   # dimensions, mounted clearance, and the single uncovered-bed above-bed fallback.
 │   │   │   ├── SpawnDestination.java
-│   │   │   │   # /spawn-only policy: current-world spawn, End obsidian platform behavior, and
-│   │   │   │   # the bounded deterministic safe-location search.
+│   │   │   │   # /spawn-only policy: Overworld/Nether/End routing, End obsidian platform behavior,
+│   │   │   │   # and the bounded deterministic safe-location search.
 │   │   │   ├── DestinationSafety.java
 │   │   │   │   # Shared placement owner for chunks, build limits, world border, support, hazards,
 │   │   │   │   # fluids, collision, and the required player or mounted-tree footprint.

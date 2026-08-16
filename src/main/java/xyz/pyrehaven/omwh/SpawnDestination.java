@@ -34,12 +34,37 @@ public final class SpawnDestination {
     }
     record Center(int x, int y, int z) { }
     record EndPlatform(BlockPos platformAnchor, Vec3 feet, float yaw, float pitch) { }
+    enum Dimension { OVERWORLD, NETHER, END, OTHER }
+    enum Target { CURRENT, OVERWORLD, DISABLED }
     enum Outcome { ACCEPT, VEHICLE_TOO_LARGE, UNSAFE, NO_WORLD_SPAWN }
     record Selection(Outcome outcome, Offset offset) { }
     record Result(Outcome outcome, DestinationSafety.Prepared destination) { }
     private record HorizontalOffset(int x, int z, long distanceSquared) { }
 
     private SpawnDestination() { }
+
+    static Dimension dimension(ServerLevel level) {
+        if (level.dimension().equals(Level.OVERWORLD)) return Dimension.OVERWORLD;
+        if (level.dimension().equals(Level.NETHER)) return Dimension.NETHER;
+        if (level.dimension().equals(Level.END)) return Dimension.END;
+        return Dimension.OTHER;
+    }
+
+    static Target route(Dimension current, boolean crossDimensionEnabled,
+                        boolean overworldEnabled, boolean netherEnabled, boolean endEnabled) {
+        boolean currentEnabled = switch (current) {
+            case OVERWORLD -> overworldEnabled;
+            case NETHER -> netherEnabled;
+            case END -> endEnabled;
+            case OTHER -> false;
+        };
+        if (currentEnabled) return Target.CURRENT;
+        if ((current == Dimension.NETHER || current == Dimension.END)
+                && crossDimensionEnabled && overworldEnabled) {
+            return Target.OVERWORLD;
+        }
+        return Target.DISABLED;
+    }
 
     static Iterable<Offset> offsets(int radius, int minY, int maxY) {
         if (radius < 0 || minY > maxY) throw new IllegalArgumentException("invalid search bounds");
