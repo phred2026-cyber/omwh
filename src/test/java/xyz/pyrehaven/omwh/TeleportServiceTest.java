@@ -7,6 +7,8 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
 
 public final class TeleportServiceTest {
+    private static final TeleportService.EntityTree<Node> NODE_TREE = new NodeTree();
+
     public static void main(String[] args) {
         sameDimensionUsesOneRootMutationAndPreservesEveryIdentity();
         crossDimensionReconcilesReplacementEntitiesAndOriginalPlayers();
@@ -181,7 +183,7 @@ public final class TeleportServiceTest {
         Node passenger = Node.player("passenger", destination);
         Node vehicle = Node.entity("vehicle", destination);
         check(TeleportService.passengerPlayers(List.of(vehicle, commandPlayer, passenger),
-                        node -> node.player, commandPlayer).equals(List.of(passenger)),
+                        NODE_TREE, commandPlayer).equals(List.of(passenger)),
                 "notifications use reconciled moved players except the command player");
     }
 
@@ -235,9 +237,7 @@ public final class TeleportServiceTest {
     private static TeleportService.Attempt<Node> attempt(Node root, Object source, Object destination,
                                                          boolean sameDimension, Function<Node, Node> teleporter,
                                                          AtomicInteger velocityClears) {
-        return TeleportService.attempt(root, source, destination, sameDimension,
-                node -> node.id, node -> node.children, node -> node.parent, node -> node.player,
-                node -> node.server, node -> node.removed, node -> node.level,
+        return TeleportService.attempt(root, source, destination, sameDimension, NODE_TREE,
                 teleporter, node -> velocityClears.incrementAndGet());
     }
 
@@ -305,6 +305,43 @@ public final class TeleportServiceTest {
         @Override
         public String toString() {
             return name;
+        }
+    }
+
+    private static final class NodeTree implements TeleportService.EntityTree<Node> {
+        @Override
+        public UUID uuid(Node node) {
+            return node.id;
+        }
+
+        @Override
+        public List<Node> children(Node node) {
+            return node.children;
+        }
+
+        @Override
+        public Node parent(Node node) {
+            return node.parent;
+        }
+
+        @Override
+        public boolean isPlayer(Node node) {
+            return node.player;
+        }
+
+        @Override
+        public boolean isServerSide(Node node) {
+            return node.server;
+        }
+
+        @Override
+        public boolean isRemoved(Node node) {
+            return node.removed;
+        }
+
+        @Override
+        public Object level(Node node) {
+            return node.level;
         }
     }
 }

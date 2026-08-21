@@ -11,9 +11,6 @@ import net.minecraft.sounds.SoundEvents;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.List;
-import java.util.function.BooleanSupplier;
-
 public final class Commands {
     private static final Logger LOGGER = LoggerFactory.getLogger("omwh");
     private static final String INTERNAL_ERROR = "§cInternal error executing /%s. Check server log.";
@@ -119,33 +116,18 @@ public final class Commands {
     }
 
     private int teleport(ServerPlayer player, DestinationSafety.Prepared destination, boolean home) {
-        TeleportService.Result[] result = new TeleportService.Result[1];
-        return completeTeleport(
-                () -> playEffects(player),
-                () -> DestinationSafety.loadDestinationChunks(
-                        destination.level(), destination.position()),
-                () -> {
-                    result[0] = TeleportService.teleport(player, destination);
-                    return result[0].success();
-                },
-                () -> send(player, home ? config.unsafeHomeMessage : config.unsafeSpawnMessage),
-                () -> {
-                    cooldowns.recordRegular(player.getUUID());
-                    send(player, home ? config.homeSuccessMessage : config.spawnSuccessMessage);
-                    String passengerMessage = passengerMessage(player.getName().getString(), home);
-                    for (ServerPlayer passenger : result[0].passengerPlayers()) send(passenger, passengerMessage);
-                });
-    }
-
-    static int completeTeleport(Runnable effects, Runnable chunkPreparation, BooleanSupplier teleport,
-                                Runnable failureFeedback, Runnable completion) {
-        effects.run();
-        chunkPreparation.run();
-        if (!teleport.getAsBoolean()) {
-            failureFeedback.run();
+        playEffects(player);
+        DestinationSafety.loadDestinationChunks(destination.level(), destination.position());
+        TeleportService.Result result = TeleportService.teleport(player, destination);
+        if (!result.success()) {
+            send(player, home ? config.unsafeHomeMessage : config.unsafeSpawnMessage);
             return 0;
         }
-        completion.run();
+
+        cooldowns.recordRegular(player.getUUID());
+        send(player, home ? config.homeSuccessMessage : config.spawnSuccessMessage);
+        String passengerMessage = passengerMessage(player.getName().getString(), home);
+        for (ServerPlayer passenger : result.passengerPlayers()) send(passenger, passengerMessage);
         return 1;
     }
 

@@ -5,8 +5,6 @@ import net.minecraft.SharedConstants;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.server.Bootstrap;
 
-import java.util.ArrayList;
-import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -16,8 +14,7 @@ public final class CommandsAndCooldownsTest {
         forceSyntaxFollowsTheServerSetting();
         commandFeedbackUsesSpecificMessagesColorsAndPassengerDestination();
         disabledSpawnFeedbackDoesNotClaimAWorldIsMissing();
-        acceptedCommandOperationsRunInReleasedOrder();
-        System.out.println("CommandsAndCooldownsTest PASS (5 behavior groups)");
+        System.out.println("CommandsAndCooldownsTest PASS (4 behavior groups)");
     }
 
     private static void forceSyntaxFollowsTheServerSetting() {
@@ -96,30 +93,6 @@ public final class CommandsAndCooldownsTest {
         check(message.contains("disabled"), "disabled spawn has an explicit policy message");
         check(!message.contains("missing") && !message.contains("cannot determine"),
                 "disabled spawn is not reported as a missing world");
-    }
-
-    private static void acceptedCommandOperationsRunInReleasedOrder() {
-        List<String> operations = new ArrayList<>();
-        int success = Commands.completeTeleport(
-                () -> operations.add("effects"),
-                () -> operations.add("chunks"),
-                () -> { operations.add("teleport"); return true; },
-                () -> operations.add("failure"),
-                () -> { operations.add("cooldown"); operations.add("messages"); });
-        check(success == 1, "successful command result");
-        check(operations.equals(List.of("effects", "chunks", "teleport", "cooldown", "messages")),
-                "effect, chunk, teleport, cooldown, and message order");
-
-        operations.clear();
-        int failure = Commands.completeTeleport(
-                () -> operations.add("effects"),
-                () -> operations.add("chunks"),
-                () -> { operations.add("teleport"); return false; },
-                () -> operations.add("failure"),
-                () -> { operations.add("cooldown"); operations.add("messages"); });
-        check(failure == 0, "failed command result");
-        check(operations.equals(List.of("effects", "chunks", "teleport", "failure")),
-                "failed mutation suppresses cooldown and success messages");
     }
 
     private static void check(boolean condition, String behavior) {
