@@ -3,7 +3,7 @@
   "id": "omwh",
   "version": "${version}",
   "name": "OMWH",
-  "description": "Server-side configurable /home and /spawn commands with cross-dimension vehicle and passenger support.",
+  "description": "Server-side /home and /spawn commands that use Minecraft's existing home and world-spawn destinations and bring mounted vehicles and passengers with you.",
   "authors": [
     "PyreHaven"
   ],
