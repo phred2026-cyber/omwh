@@ -32,7 +32,7 @@ public final class Cooldowns {
     }
 
     void recordIncomingDamageAllowedByOmwh(UUID victim, UUID playerAttacker) {
-        if (playerAttacker != null) {
+        if (playerAttacker != null && !playerAttacker.equals(victim)) {
             if (!config.enablePvpCooldown) return;
             recordEvent(victim, Type.PVP, config.pvpCooldownSeconds);
             recordEvent(playerAttacker, Type.PVP, config.pvpCooldownSeconds);
@@ -43,6 +43,10 @@ public final class Cooldowns {
 
     void recordJoin(UUID player) {
         recordEvent(player, Type.JOIN, config.joinCooldownSeconds);
+    }
+
+    void remove(UUID player) {
+        players.remove(player);
     }
 
     Blocking blocking(UUID player) {

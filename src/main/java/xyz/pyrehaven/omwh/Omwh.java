@@ -21,6 +21,8 @@ public final class Omwh implements ModInitializer {
                 commands.register(dispatcher));
         ServerPlayConnectionEvents.JOIN.register((handler, sender, server) ->
                 cooldowns.recordJoin(handler.player.getUUID()));
+        ServerPlayConnectionEvents.DISCONNECT.register((handler, server) ->
+                cooldowns.remove(handler.player.getUUID()));
         ServerLivingEntityEvents.ALLOW_DAMAGE.register((entity, source, amount) -> {
             if (entity instanceof ServerPlayer victim) {
                 if (source.getEntity() instanceof ServerPlayer attacker) {

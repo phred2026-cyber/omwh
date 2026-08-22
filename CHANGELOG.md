@@ -1,13 +1,16 @@
 # Changelog
 
-## Unreleased
+## 1.2.0 - 2026-08-21
 
 - `/home` can now use a valid bed or respawn anchor in another dimension when the server allows cross-dimension travel.
 - Server owners can control Overworld, Nether, and End `/spawn` destinations separately.
-- Added optional `/home --force` and `/spawn --force` commands for bypassing destination safety without bypassing cooldowns or command rules.
-- Normal `/home` now refuses fluids and hazards at the destination before moving the player or mounted group.
-- Vehicles, riders, and nested passengers stay together during allowed same-dimension and cross-dimension teleports.
-- Existing configuration files keep working. New settings use their default values when omitted.
+- Added `/home --force` and `/spawn --force` for operators. These commands bypass destination safety, but they still obey cooldowns, home availability, and dimension settings.
+- End `/spawn` no longer rebuilds the obsidian arrival platform by default. Server owners can enable `rebuildEndPlatform` when they want Minecraft's platform recreated.
+- Normal `/home` now refuses fluids and exact hazardous blocks at the destination before moving the player or mounted group.
+- `/spawn` now uses a bounded nearest-first search in loaded chunks, avoiding broad terrain generation from a player command.
+- Vehicles, riders, and nested passengers stay together during allowed same-dimension and cross-dimension teleports. If Minecraft reports a possible partial move, OMWH warns the group and applies the normal cooldown before another attempt.
+- Invalid known configuration values stop startup with a specific error. Existing files may omit newer fields, but quoted booleans or numbers, negative cooldowns, invalid command names, and malformed JSON must be corrected.
+- Replace the old OMWH jar when updating. Leaving both jars in the `mods` folder causes Fabric Loader to reject the duplicate mod ID.
 
 ## 1.1.3
 

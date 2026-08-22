@@ -33,8 +33,14 @@ public final class TeleportService {
         Object level(T entity);
     }
 
-    record Attempt<T>(boolean success, List<T> entities) { }
-    record Result(boolean success, List<ServerPlayer> passengerPlayers) { }
+    enum Outcome { SUCCESS, FAILED, PARTIAL }
+    record Attempt<T>(Outcome outcome, List<T> entities) {
+        boolean success() { return outcome == Outcome.SUCCESS; }
+    }
+    record Result(Outcome outcome, List<ServerPlayer> passengerPlayers) {
+        boolean success() { return outcome == Outcome.SUCCESS; }
+        boolean partial() { return outcome == Outcome.PARTIAL; }
+    }
     private record Snapshot<T>(UUID rootUuid, Map<UUID, T> entities, Map<UUID, UUID> parents,
                                Map<UUID, T> players, List<UUID> order) { }
 
@@ -44,18 +50,17 @@ public final class TeleportService {
         Entity root = source.getRootVehicle();
         if (!(root.level() instanceof ServerLevel sourceLevel)) {
             LOGGER.error("OMWH refused a teleport whose root is not in a server level");
-            return new Result(false, List.of());
+            return new Result(Outcome.FAILED, List.of());
         }
         Attempt<Entity> attempt = attempt(root, sourceLevel, destination.level(),
                 sourceLevel == destination.level(), ENTITY_TREE,
                 entity -> entity.teleport(new TeleportTransition(destination.level(), destination.position(),
                         Vec3.ZERO, destination.yaw(), destination.pitch(), TeleportTransition.DO_NOTHING)),
                 entity -> entity.setDeltaMovement(Vec3.ZERO));
-        if (!attempt.success()) return new Result(false, List.of());
         List<ServerPlayer> passengers = passengerPlayers(attempt.entities(), ENTITY_TREE, source).stream()
                 .map(entity -> (ServerPlayer) entity)
                 .toList();
-        return new Result(true, passengers);
+        return new Result(attempt.outcome(), passengers);
     }
 
     static <T> List<T> passengerPlayers(List<T> movedEntities, EntityTree<T> tree, T commandPlayer) {
@@ -67,27 +72,39 @@ public final class TeleportService {
     static <T> Attempt<T> attempt(T root, Object sourceLevel, Object destinationLevel, boolean sameDimension,
                                   EntityTree<T> tree, Function<T, T> teleporter,
                                   Consumer<T> clearVelocity) {
+        Snapshot<T> expected;
         try {
-            Snapshot<T> expected = snapshot(root, tree);
+            expected = snapshot(root, tree);
             for (T entity : expected.entities().values()) {
                 if (!tree.isServerSide(entity) || tree.isRemoved(entity) || tree.level(entity) != sourceLevel) {
                     LOGGER.error("OMWH refused an invalid source passenger tree");
-                    return failed(expected);
+                    return new Attempt<>(Outcome.FAILED, List.of());
                 }
             }
+        } catch (RuntimeException exception) {
+            LOGGER.error("OMWH refused an invalid source passenger tree", exception);
+            return new Attempt<>(Outcome.FAILED, List.of());
+        }
 
-            T movedRoot = teleporter.apply(root);
+        T movedRoot;
+        try {
+            movedRoot = teleporter.apply(root);
             if (movedRoot == null) {
                 LOGGER.error("Minecraft returned no root entity from OMWH teleport");
-                return failed(expected);
+                return new Attempt<>(Outcome.FAILED, List.of());
             }
+        } catch (RuntimeException exception) {
+            LOGGER.error("OMWH teleport mutation failed", exception);
+            return new Attempt<>(Outcome.FAILED, List.of());
+        }
 
+        try {
             Snapshot<T> moved = snapshot(movedRoot, tree);
             if (!expected.rootUuid().equals(moved.rootUuid())
                     || !expected.entities().keySet().equals(moved.entities().keySet())
                     || !expected.parents().equals(moved.parents())) {
                 LOGGER.error("Minecraft returned an incomplete or changed OMWH passenger tree");
-                return failed(moved);
+                return partial(moved);
             }
 
             for (Map.Entry<UUID, T> entry : moved.entities().entrySet()) {
@@ -95,11 +112,11 @@ public final class TeleportService {
                 T entity = entry.getValue();
                 if (!tree.isServerSide(entity) || tree.isRemoved(entity) || tree.level(entity) != destinationLevel) {
                     LOGGER.error("Minecraft left an OMWH passenger tree member outside the destination level");
-                    return failed(moved);
+                    return partial(moved);
                 }
                 if (sameDimension && expected.entities().get(entityUuid) != entity) {
                     LOGGER.error("Minecraft replaced an entity during same-dimension OMWH teleport");
-                    return failed(moved);
+                    return partial(moved);
                 }
             }
 
@@ -108,21 +125,21 @@ public final class TeleportService {
                 T movedParent = moved.entities().get(edge.getValue());
                 if (tree.parent(movedChild) != movedParent) {
                     LOGGER.error("Minecraft changed an OMWH passenger attachment during teleport");
-                    return failed(moved);
+                    return partial(moved);
                 }
             }
             for (Map.Entry<UUID, T> originalPlayer : expected.players().entrySet()) {
                 if (moved.entities().get(originalPlayer.getKey()) != originalPlayer.getValue()) {
                     LOGGER.error("Minecraft replaced a player during OMWH teleport");
-                    return failed(moved);
+                    return partial(moved);
                 }
             }
 
             clearVelocity.accept(movedRoot);
-            return new Attempt<>(true, orderedEntities(moved));
+            return new Attempt<>(Outcome.SUCCESS, orderedEntities(moved));
         } catch (RuntimeException exception) {
-            LOGGER.error("OMWH teleport attempt failed", exception);
-            return new Attempt<>(false, List.of());
+            LOGGER.error("OMWH passenger-tree reconciliation failed after teleport mutation", exception);
+            return new Attempt<>(Outcome.PARTIAL, List.of());
         }
     }
 
@@ -169,9 +186,8 @@ public final class TeleportService {
         if (uuid == null) throw new IllegalStateException("passenger tree contains a null UUID");
         return uuid;
     }
-
-    private static <T> Attempt<T> failed(Snapshot<T> snapshot) {
-        return new Attempt<>(false, orderedEntities(snapshot));
+    private static <T> Attempt<T> partial(Snapshot<T> snapshot) {
+        return new Attempt<>(Outcome.PARTIAL, orderedEntities(snapshot));
     }
 
     private static <T> List<T> orderedEntities(Snapshot<T> snapshot) {

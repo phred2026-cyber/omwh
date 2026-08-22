@@ -8,22 +8,27 @@ import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.levelgen.feature.EndPlatformFeature;
 import net.minecraft.world.phys.Vec3;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
 import java.util.Comparator;
-import java.util.HashSet;
 import java.util.Iterator;
 import java.util.List;
 import java.util.NoSuchElementException;
 import java.util.PriorityQueue;
-import java.util.Set;
+
 import java.util.function.BooleanSupplier;
+import java.util.function.Consumer;
 import java.util.function.Predicate;
+import java.util.function.Supplier;
 
 public final class SpawnDestination {
+    private static final Logger LOGGER = LoggerFactory.getLogger("omwh");
     static final int RADIUS = 64;
     static final int MIN_Y_OFFSET = -2;
     static final int MAX_Y_OFFSET = 10;
+    static final int MAX_CANDIDATES = 4_096;
     private static final List<HorizontalOffset> PRODUCTION_HORIZONTAL = horizontalOffsets(RADIUS);
     private static final Comparator<Offset> OFFSET_ORDER = Comparator.comparingLong(Offset::distanceSquared)
             .thenComparingInt(offset -> Math.abs(offset.y))
@@ -32,12 +37,13 @@ public final class SpawnDestination {
     record Offset(int x, int y, int z) {
         long distanceSquared() { return (long) x * x + (long) y * y + (long) z * z; }
     }
-    record Center(int x, int y, int z) { }
+
     record EndPlatform(BlockPos platformAnchor, Vec3 feet, float yaw, float pitch) { }
     enum Dimension { OVERWORLD, NETHER, END, OTHER }
     enum Target { CURRENT, OVERWORLD, DISABLED }
     enum Outcome { ACCEPT, VEHICLE_TOO_LARGE, UNSAFE, NO_WORLD_SPAWN }
-    record Selection(Outcome outcome, Offset offset) { }
+    record Selection(Outcome outcome, Offset offset, int candidatesVisited,
+                     int rootChecks, int playerChecks) { }
     record Result(Outcome outcome, DestinationSafety.Prepared destination) { }
     private record HorizontalOffset(int x, int z, long distanceSquared) { }
 
@@ -72,9 +78,16 @@ public final class SpawnDestination {
         return () -> new OffsetIterator(horizontal, minY, maxY);
     }
 
-    static Center fallbackCenter() { return new Center(0, 64, 0); }
-
     static Vec3 rawPosition(BlockPos spawn) { return Vec3.atBottomCenterOf(spawn); }
+
+    static BlockPos readSpawnCenter(Supplier<BlockPos> reader, Consumer<RuntimeException> failureHandler) {
+        try {
+            return reader.get();
+        } catch (RuntimeException failure) {
+            failureHandler.accept(failure);
+            return null;
+        }
+    }
 
     static EndPlatform endPlatform(BlockPos spawn, float westYaw) {
         Vec3 vanillaPosition = Vec3.atBottomCenterOf(spawn);
@@ -82,41 +95,58 @@ public final class SpawnDestination {
                 vanillaPosition.subtract(0, 1, 0), westYaw, 0.0f);
     }
 
-    static Outcome acceptEnd(BooleanSupplier rootFits, BooleanSupplier playerFits, Runnable createPlatform) {
+    static Outcome acceptEnd(boolean rebuildPlatform, BooleanSupplier rootFits,
+                             BooleanSupplier playerFits, Runnable createPlatform) {
         if (!rootFits.getAsBoolean()) {
             return playerFits != null && playerFits.getAsBoolean() ? Outcome.VEHICLE_TOO_LARGE : Outcome.UNSAFE;
         }
-        createPlatform.run();
+        createEndPlatformIfEnabled(rebuildPlatform, createPlatform);
         return Outcome.ACCEPT;
+    }
+
+    static void createEndPlatformIfEnabled(boolean rebuildPlatform, Runnable createPlatform) {
+        if (rebuildPlatform) createPlatform.run();
     }
 
     static Selection select(Iterable<Offset> candidates, Predicate<Offset> rootFits,
                             Predicate<Offset> playerFits) {
-        for (Offset candidate : candidates) {
-            if (rootFits.test(candidate)) return new Selection(Outcome.ACCEPT, candidate);
-        }
-        if (playerFits != null) {
-            for (Offset candidate : candidates) {
-                if (playerFits.test(candidate)) return new Selection(Outcome.VEHICLE_TOO_LARGE, null);
-            }
-        }
-        return new Selection(Outcome.UNSAFE, null);
+        return select(candidates, MAX_CANDIDATES, rootFits, playerFits);
     }
 
-    static Result find(ServerPlayer player, ServerLevel level, boolean force) {
+    static Selection select(Iterable<Offset> candidates, int maxCandidates,
+                            Predicate<Offset> rootFits, Predicate<Offset> playerFits) {
+        if (maxCandidates < 0) throw new IllegalArgumentException("maxCandidates must be nonnegative");
+        int visited = 0;
+        int rootChecks = 0;
+        int playerChecks = 0;
+        boolean playerCouldFit = false;
+        for (Offset candidate : candidates) {
+            if (visited >= maxCandidates) break;
+            visited++;
+            rootChecks++;
+            if (rootFits.test(candidate)) {
+                return new Selection(Outcome.ACCEPT, candidate, visited, rootChecks, playerChecks);
+            }
+            if (playerFits != null) {
+                playerChecks++;
+                playerCouldFit |= playerFits.test(candidate);
+            }
+        }
+        return new Selection(playerCouldFit ? Outcome.VEHICLE_TOO_LARGE : Outcome.UNSAFE,
+                null, visited, rootChecks, playerChecks);
+    }
+
+    static Result find(ServerPlayer player, ServerLevel level, boolean force, boolean rebuildEndPlatform) {
         Entity root = player.getRootVehicle();
         int rootWidth = root == player ? 1 : (int) Math.max(1, Math.ceil(root.getBbWidth()));
         int rootHeight = root == player ? 2 : (int) Math.max(3, Math.ceil(root.getBbHeight()) + 2);
-        if (level.dimension().equals(Level.END)) return findEnd(level, root, player, force);
-
-        BlockPos center;
-        try {
-            center = level.getRespawnData().pos();
-            if (center == null) return new Result(Outcome.NO_WORLD_SPAWN, null);
-        } catch (RuntimeException spawnReadFailure) {
-            Center fallback = fallbackCenter();
-            center = new BlockPos(fallback.x, fallback.y, fallback.z);
+        if (level.dimension().equals(Level.END)) {
+            return findEnd(level, root, player, force, rebuildEndPlatform);
         }
+
+        BlockPos center = readSpawnCenter(() -> level.getRespawnData().pos(), failure ->
+                LOGGER.error("Could not read world spawn for OMWH /spawn", failure));
+        if (center == null) return new Result(Outcome.NO_WORLD_SPAWN, null);
         if (force) {
             return new Result(Outcome.ACCEPT, new DestinationSafety.Prepared(level,
                     rawPosition(center), root.getYRot(), root.getXRot()));
@@ -124,13 +154,12 @@ public final class SpawnDestination {
 
         BlockPos resolvedCenter = center;
         Iterable<Offset> candidates = offsets(RADIUS, MIN_Y_OFFSET, MAX_Y_OFFSET);
-        Set<Long> loadedChunks = new HashSet<>();
-        Selection selection = select(candidates,
+        Selection selection = select(candidates, MAX_CANDIDATES,
                 offset -> DestinationSafety.spawnFits(
-                        level, feet(resolvedCenter, offset), rootWidth, rootHeight, loadedChunks),
+                        level, feet(resolvedCenter, offset), rootWidth, rootHeight),
                 root == player ? null
                         : offset -> DestinationSafety.spawnFits(
-                                level, feet(resolvedCenter, offset), 1, 2, loadedChunks));
+                                level, feet(resolvedCenter, offset), 1, 2));
         if (selection.outcome != Outcome.ACCEPT) return new Result(selection.outcome, null);
 
         BlockPos feet = feet(resolvedCenter, selection.offset);
@@ -140,19 +169,20 @@ public final class SpawnDestination {
                 root.getYRot(), root.getXRot()));
     }
 
-    private static Result findEnd(ServerLevel level, Entity root, ServerPlayer player, boolean force) {
+    private static Result findEnd(ServerLevel level, Entity root, ServerPlayer player,
+                                  boolean force, boolean rebuildPlatform) {
         EndPlatform platform = endPlatform(ServerLevel.END_SPAWN_POINT, Direction.WEST.toYRot());
         if (force) {
-            EndPlatformFeature.createEndPlatform(level, platform.platformAnchor, true);
+            createEndPlatformIfEnabled(rebuildPlatform,
+                    () -> EndPlatformFeature.createEndPlatform(level, platform.platformAnchor, true));
             return new Result(Outcome.ACCEPT, new DestinationSafety.Prepared(level,
                     platform.feet, platform.yaw, platform.pitch));
         }
-        Set<Long> loadedChunks = new HashSet<>();
-        Outcome outcome = acceptEnd(
+        Outcome outcome = acceptEnd(rebuildPlatform,
                 () -> DestinationSafety.endFits(
-                        level, root, platform.feet, platform.platformAnchor, loadedChunks),
+                        level, root, platform.feet, platform.platformAnchor, rebuildPlatform),
                 root == player ? null : () -> DestinationSafety.endFits(
-                        level, player, platform.feet, platform.platformAnchor, loadedChunks),
+                        level, player, platform.feet, platform.platformAnchor, rebuildPlatform),
                 () -> EndPlatformFeature.createEndPlatform(level, platform.platformAnchor, true));
         if (outcome != Outcome.ACCEPT) return new Result(outcome, null);
         return new Result(Outcome.ACCEPT, new DestinationSafety.Prepared(level,

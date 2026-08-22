@@ -27,7 +27,8 @@ public final class OmwhConfig {
     private static final String[] BOOLEAN_FIELDS = {
             "enableRegularCooldown", "enablePvpCooldown", "enableDamageCooldown",
             "playTeleportSound", "spawnTeleportParticles", "enableForceOverride",
-            "enableCrossDimensionTeleport", "enableOverworldSpawn", "enableNetherSpawn", "enableEndSpawn"
+            "enableCrossDimensionTeleport", "enableOverworldSpawn", "enableNetherSpawn", "enableEndSpawn",
+            "rebuildEndPlatform"
     };
     private static final String[] INTEGER_FIELDS = {
             "regularCooldownSeconds", "pvpCooldownSeconds", "damageCooldownSeconds", "joinCooldownSeconds"
@@ -49,6 +50,7 @@ public final class OmwhConfig {
     public boolean enableOverworldSpawn = true;
     public boolean enableNetherSpawn = true;
     public boolean enableEndSpawn = true;
+    public boolean rebuildEndPlatform = false;
     public String homeSuccessMessage = "§aTeleported to your home!";
     public String spawnSuccessMessage = "§aTeleported to world spawn!";
     public String noHomepointMessage = "§cYou don't have a spawn point set!";

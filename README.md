@@ -26,7 +26,7 @@ Server owners can allow valid homes in other dimensions. Missing, destroyed, blo
 
 `/spawn` takes you to the spawn destination selected for your current world. Server owners can control Overworld, Nether, and End spawn travel separately.
 
-Outside the End, OMWH looks for solid ground near spawn with enough clear space for the player or mounted vehicle. In the End, it uses Minecraft's arrival platform.
+Outside the End, OMWH checks a bounded set of already-loaded positions near spawn for solid ground and enough clear space for the player or mounted vehicle. In the End, it uses the existing arrival area by default; server owners can explicitly allow OMWH to rebuild Minecraft's obsidian platform.
 
 ### Bringing vehicles and friends
 
@@ -36,7 +36,7 @@ The whole group stays attached during the teleport. If the destination does not 
 
 ### Force commands
 
-Server owners can enable `/home --force` and `/spawn --force`. These forms skip the normal destination safety check, but they do not bypass cooldowns, missing homes, disabled dimensions, or other command rules.
+Server owners can enable `/home --force` and `/spawn --force`. Only operators with gamemaster-level command permission can use them. These forms skip the normal destination safety check, but they do not bypass cooldowns, missing homes, disabled dimensions, or other command rules.
 
 ## Cooldowns
 
@@ -55,7 +55,7 @@ Damage cooldowns start when OMWH allows an incoming damage event. Another mod ca
 
 1. Install [Fabric Loader](https://fabricmc.net/use/) for Minecraft 26.2.
 2. Install [Fabric API](https://modrinth.com/mod/fabric-api) on the server.
-3. Put the OMWH jar in the server's `mods` folder.
+3. Remove any older OMWH jar from the server's `mods` folder, then put the new jar there. Keeping both versions causes Fabric Loader to stop on a duplicate mod ID.
 4. Start the server once to create `config/omwh.json`.
 
 Players do not need to install OMWH on their clients. OMWH also works in singleplayer.
@@ -81,10 +81,11 @@ Edit `config/omwh.json` after the first launch.
 | `enableCrossDimensionTeleport` | `true` | Allow valid cross-dimension homes and eligible spawn travel |
 | `enableOverworldSpawn` | `true` | Allow the Overworld spawn destination |
 | `enableNetherSpawn` | `true` | Allow the Nether spawn destination |
-| `enableEndSpawn` | `true` | Allow the End arrival platform |
+| `enableEndSpawn` | `true` | Allow the End spawn destination |
+| `rebuildEndPlatform` | `false` | Allow `/spawn` in the End to rebuild Minecraft's obsidian arrival platform |
 | Message fields | See config | Messages shown to players; supports Minecraft color codes and `{time}` |
 
-Set a cooldown duration to `0` to disable it. Existing configuration files can omit newer fields; OMWH uses the default value for anything missing. Unknown fields are ignored, but known settings must use the correct JSON type.
+Set a cooldown duration to `0` to disable it. Existing configuration files can omit newer fields; OMWH uses the default value for anything missing. Unknown fields are ignored. Known settings must use the documented JSON type, and invalid command names, negative cooldowns, malformed JSON, or other invalid known values stop startup with a clear configuration error instead of being silently ignored.
 
 ## Links
 

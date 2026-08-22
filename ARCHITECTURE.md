@@ -1,6 +1,6 @@
 # OMWH Structure
 
-This tree describes the in-development rewrite. Artifacts remain marked `1.1.3-dev` and are not release-safe until runtime verification and release selection are complete.
+This tree describes the OMWH 1.2.0 release candidate. The version is selected, but publication still waits for connected runtime verification and Elijah's explicit release approval.
 
 `/home` and `/spawn` differ only in destination policy. `Commands`, `Cooldowns`,
 `DestinationSafety`, and `TeleportService` are their shared owners for command flow, cooldown state,
@@ -51,6 +51,8 @@ omwh/
 │           │   # Home, spawn, safety checks, mounted placement, and End behavior.
 │           └── TeleportServiceTest.java
 │               # Vehicle/passenger movement, failed preparation, and attachment preservation.
+├── .github/workflows/ci.yml
+│   # Runs the canonical Gradle build and regression suites on pushes and pull requests.
 ├── ARCHITECTURE.md
 │   # This proposed file tree. Bug and verification checks compare code placement against it.
 ├── FEATURES.md

@@ -1,6 +1,10 @@
 package xyz.pyrehaven.omwh;
 
+import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
+import net.minecraft.server.Bootstrap;
+import net.minecraft.world.entity.EntityDimensions;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.ArrayList;
@@ -12,15 +16,21 @@ import java.util.concurrent.atomic.AtomicInteger;
 
 public final class DestinationsTest {
     public static void main(String[] args) {
+        SharedConstants.tryDetectVersion();
+        Bootstrap.bootStrap();
         homePolicyAllowsOnlyAcceptedRespawnsAndOneBedAlternate();
         unmountedHomeRejectsHazardsUnlessForceWasRequested();
+        homeSafetyUsesStandingDimensionsAndExactHazards();
         spawnRoutingHonorsThreePoliciesAndCrossingBoundary();
         forceUsesRawDestinationsWithoutChangingAdmission();
         mountedHomeClearanceUsesRootMarginsAndOnlyBedPolicyExemption();
         mountedHazardsDoNotMasqueradeAsVehicleClearanceFailures();
         endPolicyUsesVanillaPlatformPlacement();
         endPlatformMutationFollowsSideEffectFreeAcceptance();
+        endAcceptanceRejectsUnloadedOwnerChunksWithoutLoading();
         spawnSearchIsBoundedDeterministicAndComplete();
+        spawnReadFailureNeverInventsCoordinates();
+        spawnSearchUsesOneBoundedLoadedChunkPass();
         spawnFailureDistinguishesOversizedVehicle();
         collisionOwnersIncludeShellAndEveryInvolvedChunk();
         safetyOwnsFootprintsHazardsAndFiveByFiveChunkPreparation();
@@ -46,10 +56,10 @@ public final class DestinationsTest {
     }
 
     private static void unmountedHomeRejectsHazardsUnlessForceWasRequested() {
-        check(DestinationSafety.isUnsafeHomeCell(true, "block.minecraft.stone"), "home fluid hazard");
-        check(DestinationSafety.isUnsafeHomeCell(false, "block.minecraft.lava"), "home lava hazard");
-        check(DestinationSafety.isUnsafeHomeCell(false, "block.minecraft.cactus"), "home cactus hazard");
-        check(!DestinationSafety.isUnsafeHomeCell(false, "block.minecraft.stone"), "ordinary home block");
+        check(DestinationSafety.isUnsafeHomeCell(true, Blocks.STONE), "home fluid hazard");
+        check(DestinationSafety.isUnsafeHomeCell(false, Blocks.LAVA), "home lava hazard");
+        check(DestinationSafety.isUnsafeHomeCell(false, Blocks.CACTUS), "home cactus hazard");
+        check(!DestinationSafety.isUnsafeHomeCell(false, Blocks.STONE), "ordinary home block");
         AtomicInteger normalChecks = new AtomicInteger();
         check(!HomeDestination.acceptUnmounted(false, () -> {
             normalChecks.incrementAndGet();
@@ -63,6 +73,19 @@ public final class DestinationsTest {
             return false;
         }), "force bypasses destination safety");
         check(forcedChecks.get() == 0, "force never reads destination safety");
+    }
+
+    private static void homeSafetyUsesStandingDimensionsAndExactHazards() {
+        var standing = DestinationSafety.standingPlayerBounds(
+                new Vec3(10.0, 64.0, -3.0), EntityDimensions.fixed(0.6f, 1.8f));
+        check(standing.minY() == 64.0 && standing.maxY() > 65.79,
+                "unmounted home safety always checks standing height");
+        check(DestinationSafety.isHazard(Blocks.FIRE), "fire is hazardous");
+        check(DestinationSafety.isHazard(Blocks.SOUL_FIRE), "soul fire is hazardous");
+        check(DestinationSafety.isHazard(Blocks.LAVA), "lava is hazardous");
+        check(DestinationSafety.isHazard(Blocks.MAGMA_BLOCK), "magma is hazardous");
+        check(!DestinationSafety.isHazard(Blocks.FIRE_CORAL), "fire coral is not fire");
+        check(!DestinationSafety.isHazard(Blocks.DEAD_FIRE_CORAL_BLOCK), "dead fire coral is not fire");
     }
 
     private static void spawnRoutingHonorsThreePoliciesAndCrossingBoundary() {
@@ -159,7 +182,7 @@ public final class DestinationsTest {
 
     private static void endPlatformMutationFollowsSideEffectFreeAcceptance() {
         List<String> operations = new ArrayList<>();
-        SpawnDestination.Outcome denied = SpawnDestination.acceptEnd(
+        SpawnDestination.Outcome denied = SpawnDestination.acceptEnd(true,
                 () -> { operations.add("root-fit"); return false; },
                 () -> { operations.add("player-fit"); return false; },
                 () -> operations.add("create-platform"));
@@ -167,7 +190,7 @@ public final class DestinationsTest {
         check(operations.equals(List.of("root-fit", "player-fit")), "denial never mutates End platform");
 
         operations.clear();
-        SpawnDestination.Outcome oversized = SpawnDestination.acceptEnd(
+        SpawnDestination.Outcome oversized = SpawnDestination.acceptEnd(true,
                 () -> { operations.add("root-fit"); return false; },
                 () -> { operations.add("player-fit"); return true; },
                 () -> operations.add("create-platform"));
@@ -175,11 +198,39 @@ public final class DestinationsTest {
         check(operations.equals(List.of("root-fit", "player-fit")), "vehicle denial never mutates End platform");
 
         operations.clear();
-        SpawnDestination.Outcome accepted = SpawnDestination.acceptEnd(
+        SpawnDestination.Outcome accepted = SpawnDestination.acceptEnd(true,
                 () -> { operations.add("root-fit"); return true; }, null,
                 () -> operations.add("create-platform"));
         check(accepted == SpawnDestination.Outcome.ACCEPT, "accepted End destination");
         check(operations.equals(List.of("root-fit", "create-platform")), "platform created only after acceptance");
+
+        operations.clear();
+        SpawnDestination.Outcome preserved = SpawnDestination.acceptEnd(false,
+                () -> { operations.add("real-root-fit"); return true; }, null,
+                () -> operations.add("create-platform"));
+        check(preserved == SpawnDestination.Outcome.ACCEPT, "existing safe End destination accepted");
+        check(operations.equals(List.of("real-root-fit")),
+                "disabled rebuilding inspects existing safety without mutating blocks");
+        SpawnDestination.createEndPlatformIfEnabled(false, () -> operations.add("forced-platform"));
+        check(!operations.contains("forced-platform"), "forced End spawn does not mutate when rebuilding is disabled");
+        check(DestinationSafety.isSafeEndSupport(false, true, false), "real solid End support accepted");
+        check(!DestinationSafety.isSafeEndSupport(false, false, false), "missing real End support rejected");
+    }
+
+    private static void endAcceptanceRejectsUnloadedOwnerChunksWithoutLoading() {
+        var occupied = new DestinationSafety.Bounds(15, 64, 15, 16, 65, 16);
+        AtomicInteger loadedProbes = new AtomicInteger();
+        AtomicInteger collisionReads = new AtomicInteger();
+        boolean accepted = DestinationSafety.loadedAndCollisionFree(occupied, chunk -> {
+            loadedProbes.incrementAndGet();
+            return false;
+        }, cell -> {
+            collisionReads.incrementAndGet();
+            return List.of();
+        });
+        check(!accepted, "unloaded End owner chunk fails closed");
+        check(loadedProbes.get() == 1, "End acceptance stops at the first unloaded owner chunk");
+        check(collisionReads.get() == 0, "unloaded End acceptance performs no block reads or loading callback");
     }
 
     private static void spawnSearchIsBoundedDeterministicAndComplete() {
@@ -200,7 +251,41 @@ public final class DestinationsTest {
         check(elapsedNanos < 5_000_000_000L, "production search work completes promptly");
         System.out.printf("Spawn offset traversal count=%d elapsedMs=%.3f%n",
                 production.size(), elapsedNanos / 1_000_000.0);
-        check(SpawnDestination.fallbackCenter().equals(new SpawnDestination.Center(0, 64, 0)), "spawn fallback center");
+    }
+
+    private static void spawnReadFailureNeverInventsCoordinates() {
+        List<RuntimeException> failures = new ArrayList<>();
+        BlockPos center = SpawnDestination.readSpawnCenter(() -> {
+            throw new IllegalStateException("spawn data unavailable");
+        }, failures::add);
+        check(center == null, "spawn read failure has no fabricated fallback center");
+        check(failures.size() == 1 && failures.getFirst().getMessage().contains("unavailable"),
+                "spawn read failure reaches the logger boundary");
+        BlockPos expected = new BlockPos(4, 70, -9);
+        check(SpawnDestination.readSpawnCenter(() -> expected, failures::add).equals(expected),
+                "successful spawn read preserves the authoritative center");
+    }
+
+    private static void spawnSearchUsesOneBoundedLoadedChunkPass() {
+        List<String> probes = new ArrayList<>();
+        SpawnDestination.Selection selection = SpawnDestination.select(
+                List.of(new SpawnDestination.Offset(0, 0, 0), new SpawnDestination.Offset(1, 0, 0),
+                        new SpawnDestination.Offset(2, 0, 0)), 2,
+                offset -> { probes.add("root:" + offset.x()); return false; },
+                offset -> { probes.add("player:" + offset.x()); return offset.x() == 0; });
+        check(selection.outcome() == SpawnDestination.Outcome.VEHICLE_TOO_LARGE,
+                "bounded pass retains mounted diagnostic");
+        check(selection.candidatesVisited() == 2 && selection.rootChecks() == 2
+                        && selection.playerChecks() == 2,
+                "structural counters prove the search cap and one diagnostic per candidate");
+        check(probes.equals(List.of("root:0", "player:0", "root:1", "player:1")),
+                "root and player diagnostics share one nearest-first pass");
+
+        var owners = new DestinationSafety.CellRange(0, 16, 0, 1, 0, 0);
+        AtomicInteger loadedChecks = new AtomicInteger();
+        check(!DestinationSafety.allChunksLoaded(owners, chunk ->
+                loadedChecks.incrementAndGet() == 1), "candidate probing rejects an unloaded owner chunk");
+        check(loadedChecks.get() == 2, "loaded-chunk probe stops at the first missing chunk");
     }
 
     private static void spawnFailureDistinguishesOversizedVehicle() {
@@ -268,11 +353,11 @@ public final class DestinationsTest {
                 new DestinationSafety.Footprint(9, 11, -4, -2)), "square root footprint");
         check(DestinationSafety.footprint(16.0, -16.0, 2.0).equals(
                 new DestinationSafety.Footprint(15, 16, -17, -16)), "footprint exclusive maxima");
-        for (String id : List.of("fire", "lava", "magma_block", "cactus", "sweet_berry_bush",
-                "wither_rose", "powder_snow")) {
-            check(DestinationSafety.isHazard(id), "hazard " + id);
+        for (var block : List.of(Blocks.FIRE, Blocks.LAVA, Blocks.MAGMA_BLOCK, Blocks.CACTUS,
+                Blocks.SWEET_BERRY_BUSH, Blocks.WITHER_ROSE, Blocks.POWDER_SNOW)) {
+            check(DestinationSafety.isHazard(block), "hazard " + block);
         }
-        check(!DestinationSafety.isHazard("stone"), "safe support");
+        check(!DestinationSafety.isHazard(Blocks.STONE), "safe support");
         Set<Long> chunks = new HashSet<>(DestinationSafety.destinationChunks(31.5, -0.5));
         check(chunks.size() == 25, "five-by-five chunks");
         check(chunks.contains(DestinationSafety.chunkKey(1, -1)), "center chunk");

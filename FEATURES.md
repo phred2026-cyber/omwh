@@ -2,7 +2,7 @@
 
 ## Status
 
-This file is the accepted gameplay contract for the in-development OMWH rewrite. Its `1.1.3-dev` artifact is not a release candidate and must not be published or installed as the playable `1.1.3` release. The eight production owners and four grouped regression files are defined in `ARCHITECTURE.md`.
+This file is the accepted gameplay contract for the OMWH 1.2.0 release candidate. The version is selected for local test-server deployment, but official publication still waits for connected runtime verification and Elijah's explicit approval. The eight production owners and four grouped regression files are defined in `ARCHITECTURE.md`.
 
 ## Runtime scope
 
@@ -16,7 +16,7 @@ This file is the accepted gameplay contract for the in-development OMWH rewrite.
 - The configured home command defaults to `/home`.
 - `/home --force` uses the same authoritative vanilla respawn position while deliberately bypassing
   destination-safety checks. It remains subject to player-source, cooldown, missing-home, and
-  dimension-admission rules, and exists only while `enableForceOverride` is enabled.
+  dimension-admission rules, and exists only while `enableForceOverride` is enabled. It also requires gamemaster-level operator permission.
 - A home exists only when Minecraft has a valid configured respawn point for the player: a bed, a charged respawn anchor, or a forced respawn point.
 - OMWH asks Minecraft for its normal respawn placement without consuming a respawn-anchor charge.
 - A missing or destroyed respawn point is not replaced with world spawn.
@@ -32,15 +32,14 @@ This file is the accepted gameplay contract for the in-development OMWH rewrite.
 ## `/spawn`
 
 - The configured spawn command defaults to `/spawn`.
-- `/spawn --force` uses the raw spawn block-center feet position of the destination selected by the same routing settings as normal `/spawn`, without running the ordinary safe-location search. In the End it uses the built-in End arrival position and
-  platform behavior. It remains subject to player-source and cooldown rules, and exists only while
-  `enableForceOverride` is enabled.
+- `/spawn --force` uses the raw spawn block-center feet position of the destination selected by the same routing settings as normal `/spawn`, without running the ordinary safe-location search. In the End it uses the built-in End arrival position. It rebuilds the obsidian platform only when `rebuildEndPlatform` is enabled. It remains subject to player-source and cooldown rules, and exists only while
+  `enableForceOverride` is enabled. It also requires gamemaster-level operator permission.
 - In the Overworld, `/spawn` uses Overworld spawn only while `enableOverworldSpawn` is enabled. If it is disabled, the command is denied without selecting another dimension.
 - In the Nether, enabled `enableNetherSpawn` always selects Nether spawn, regardless of `enableCrossDimensionTeleport`.
-- In the End, enabled `enableEndSpawn` always selects the End arrival point and platform, regardless of `enableCrossDimensionTeleport`.
+- In the End, enabled `enableEndSpawn` always selects the End arrival destination, regardless of `enableCrossDimensionTeleport`.
 - If Nether or End spawn is disabled, `/spawn` selects Overworld spawn only when both `enableCrossDimensionTeleport` and `enableOverworldSpawn` are enabled. Otherwise it reports that spawn teleporting is disabled for that dimension and performs no mutation.
-- In the End, OMWH recreates Minecraft 26.2's obsidian arrival platform at the built-in End spawn point and places the group at the platform feet position with vanilla's west-facing orientation. It does not run the ordinary spawn search there.
-- Outside the End-specific rule, OMWH searches deterministically near the selected world's spawn for the nearest accepted feet position. The search is bounded to a horizontal radius of 64 blocks and vertical offsets from 2 blocks below through 10 blocks above spawn. If reading the selected world's spawn throws, the released locator uses `(0, 64, 0)` as its fallback search center.
+- In the End, OMWH uses Minecraft 26.2's built-in arrival position with vanilla's west-facing orientation. By default it checks the existing blocks and refuses an obstructed or unsupported destination without changing the world. When `rebuildEndPlatform` is enabled, it may recreate Minecraft's obsidian arrival platform after side-effect-free acceptance checks. It does not run the ordinary spawn search there.
+- Outside the End-specific rule, OMWH checks at most 4,096 deterministic nearest-first candidates within a horizontal radius of 64 blocks and vertical offsets from 2 blocks below through 10 blocks above spawn. Candidate checks read only already-loaded chunks and never generate terrain. If world spawn cannot be read, the command fails explicitly instead of inventing fallback coordinates.
 - The destination must support and contain the square footprint derived from the player or root vehicle size, with enough clear height for that root.
 - If the mounted group cannot fit but an unmounted player could, the command explains that the vehicle is too large and asks the player to dismount. If no safe destination exists, it reports the configured unsafe-spawn failure.
 
@@ -54,7 +53,7 @@ checks and no other admission rule.
   supporting layer, even when Minecraft supplied the respawn position.
 - Mounted `/home` checks the translated root-vehicle bounds, the required horizontal and upper clearance margins, block collision, fluids and hazards in the vehicle space or supporting layer, the configured-bed exemption, and the world border. Passenger hitboxes do not enlarge this clearance volume.
 - `/spawn` requires full-block support beneath the complete square root footprint and clear occupied blocks through the required root height.
-- `/spawn` rejects fluids and hazardous blocks, including fire, lava, magma, cactus, sweet berry bushes, wither roses, and powder snow.
+- `/spawn` rejects fluids and hazardous blocks, including exact fire, soul fire, lava, magma, cactus, sweet berry bush, wither rose, and powder snow blocks. Names that merely contain those words, such as fire coral, are not hazards.
 - After selecting any accepted home or spawn destination, OMWH loads the fixed five-by-five chunk area around it before teleport mutation.
 - Released placement checks do not reject external entities. Self-collision and broader passenger-tree collision rules are decisions for later feature work, not preserved behavior.
 - Safety decisions are deterministic. An unsafe candidate is a denial, not permission to use an unchecked fallback.
@@ -65,22 +64,22 @@ checks and no other admission rule.
 - `TeleportService` captures entity identity and every parent-child attachment before mutation.
 - Same- and cross-dimension movement is performed by one recursive teleport of the root entity. OMWH does not manually dismount, move, and remount the tree.
 - Destination placement uses feet coordinates and preserves the captured attachment graph. A successful move clears carried root velocity.
-- A null teleport result, a runtime exception during mutation, or any changed attachment after mutation is logged by `TeleportService` and returned to the command as teleport failure. The released behavior does not promise rollback after mutation has started.
+- A null teleport result or teleport exception supplies no moved root and is logged as an internal command failure with no passenger notification or regular cooldown. Once Minecraft returns a moved root, a failed passenger-tree reconciliation is reported as a possible partial teleport; OMWH notifies trustworthy moved player passengers, records the regular cooldown to prevent free retries, and does not promise rollback.
 - Player passengers receive a message naming the command user and whether the group traveled to home or spawn.
 
 ## Cooldowns and events
 
 Cooldown state is keyed by player UUID and owned only by `Cooldowns`.
 
-- Regular cooldown: defaults to 30 seconds, is configurable and independently enabled, and begins only after a successful `/home` or `/spawn` teleport.
+- Regular cooldown: defaults to 30 seconds, is configurable and independently enabled, and begins after a successful teleport or a possible partial move past the mutation boundary.
 - PvP cooldown: defaults to 45 seconds, is configurable and independently enabled, and applies to both player attacker and player victim when incoming player-versus-player damage reaches OMWH's `ALLOW_DAMAGE` callback and OMWH allows it to continue.
-- Damage cooldown: defaults to 10 seconds, is configurable and independently enabled, and applies to a player when incoming non-player damage reaches OMWH's `ALLOW_DAMAGE` callback and OMWH allows it to continue.
+- Damage cooldown: defaults to 10 seconds, is configurable and independently enabled, and applies when incoming non-player or self-inflicted damage reaches OMWH's `ALLOW_DAMAGE` callback and OMWH allows it to continue.
 - Join cooldown: defaults to 30 seconds and applies when a player joins. A value of `0` disables it.
 - A disabled cooldown or a duration of `0` does not block teleporting.
 - When event cooldowns overlap, the longer unexpired event restriction wins; a shorter event cannot reduce an existing longer restriction.
 - Blocking priority and message selection are PvP, damage, join, then regular. Remaining time replaces `{time}` in the selected message.
 - Failed or denied command attempts do not begin the regular cooldown.
-- Cooldowns live only in process memory. UUID keys let active restrictions survive player-object replacement, respawn, and reconnect while the server process remains alive; expired entries are removed lazily when queried.
+- Cooldowns live only in process memory. UUID keys let active restrictions survive player-object replacement and respawn. State is removed when the player disconnects, and expired entries are removed lazily when queried.
 - PvP and other damage restrictions are recorded from Fabric's `ALLOW_DAMAGE` callback when OMWH allows the incoming damage event to continue. This callback runs before mitigation and does not observe the final event result: another listener may later cancel the damage, but the OMWH cooldown has already begun.
 
 ## Messages and effects
@@ -92,7 +91,7 @@ Cooldown state is keyed by player UUID and owned only by `Cooldowns`.
 - Teleport attempts may play the Enderman teleport sound at volume `0.5` and pitch `1.0`, controlled by `playTeleportSound`.
 - Teleport attempts may spawn 40 portal particles in a one-block ring around the command player, controlled by `spawnTeleportParticles`.
 - Effects run after destination acceptance but before entity mutation, so a mutation failure may still produce them. A denial before that point produces none.
-- A denial or failed mutation must not send a success message or begin the regular cooldown. Unexpected failures are logged with their cause and return command failure rather than being reported as success.
+- A denial or pre-mutation failure must not send a success message or begin the regular cooldown. A possible partial move uses its warning and cooldown instead. Unexpected failures are logged with their cause and return command failure rather than being reported as success.
 
 ## Configuration
 
@@ -111,11 +110,12 @@ Cooldown state is keyed by player UUID and owned only by `Cooldowns`.
 | `joinCooldownSeconds` | `30` | Join cooldown duration; `0` disables it |
 | `playTeleportSound` | `true` | Enables the pre-mutation teleport-attempt sound |
 | `spawnTeleportParticles` | `true` | Enables pre-mutation teleport-attempt particles |
-| `enableForceOverride` | `true` | Registers the literal `--force` form for both commands |
+| `enableForceOverride` | `true` | Registers the operator-only literal `--force` form for both commands |
 | `enableCrossDimensionTeleport` | `true` | Allows valid cross-dimension homes and eligible Nether/End-to-Overworld spawn routes |
 | `enableOverworldSpawn` | `true` | Allows Overworld spawn as the current or selected destination |
 | `enableNetherSpawn` | `true` | Allows Nether spawn while the player is in the Nether |
-| `enableEndSpawn` | `true` | Allows the End arrival point and platform while the player is in the End |
+| `enableEndSpawn` | `true` | Allows the End arrival destination while the player is in the End |
+| `rebuildEndPlatform` | `false` | Allows End `/spawn` to rebuild Minecraft's obsidian arrival platform after acceptance checks |
 | `homeSuccessMessage` | `"§aTeleported to your home!"` | `/home` success text |
 | `spawnSuccessMessage` | `"§aTeleported to world spawn!"` | `/spawn` success text |
 | `noHomepointMessage` | `"§cYou don't have a spawn point set!"` | Missing or invalid home text |
@@ -137,6 +137,6 @@ The configuration path is not strict whole-document schema validation: unknown k
 - Destination discovery and the checks required by that command complete before teleport mutation begins.
 - No command catches an invariant violation and retries through another destination or mutation path.
 - Unexpected command exceptions are logged with context, send the command user an internal-error message, and return command failure.
-- Teleport-service mutation failures are logged and surfaced to the command as its configured unsafe-home or unsafe-spawn failure. The released behavior does not distinguish partial post-mutation failure for the command user.
-- `/spawn` reports an explicit failure when it cannot determine the current world. It also has a world-spawn failure outcome if the locator returns no center, although spawn-read exceptions normally take the released `(0, 64, 0)` fallback instead.
-- A successful result means the recursive root teleport returned an entity, the captured attachments remained intact, success feedback was sent, and the regular cooldown was recorded.
+- Destination-safety denials use the configured unsafe-home or unsafe-spawn message. Teleport invariant failures with no returned moved root use the command-specific internal-error message. Neither begins the regular cooldown or notifies passengers. Reconciliation failures after a non-null moved root use a distinct partial-teleport warning, notify trustworthy moved player passengers, and begin the regular cooldown.
+- `/spawn` reports an explicit failure when it cannot determine the current world or read the selected world's spawn. It never substitutes fabricated fallback coordinates.
+- A successful result means the recursive root teleport returned an entity, the captured attachments remained intact, success feedback was sent, and the regular cooldown was recorded. A possible partial result is not success, but it still records the cooldown because movement may already have happened.

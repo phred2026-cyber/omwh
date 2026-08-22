@@ -15,6 +15,7 @@ public final class Commands {
     private static final Logger LOGGER = LoggerFactory.getLogger("omwh");
     private static final String INTERNAL_ERROR = "§cInternal error executing /%s. Check server log.";
     private static final String VEHICLE_TOO_LARGE = "§cYour vehicle is too big. Please dismount and try again.";
+    private static final String PARTIAL_TELEPORT = "§eTeleport may have partially completed, but OMWH could not verify every passenger attachment. Check your group before moving again.";
     static final String SPAWN_DISABLED = "§cSpawn teleporting is disabled for this dimension.";
     private final OmwhConfig config;
     private final Cooldowns cooldowns;
@@ -33,8 +34,12 @@ public final class Commands {
                 .executes(context -> executeSpawn(context.getSource().getPlayer(), false));
         if (config.enableForceOverride) {
             home.then(net.minecraft.commands.Commands.literal("--force")
+                    .requires(net.minecraft.commands.Commands.hasPermission(
+                            net.minecraft.commands.Commands.LEVEL_GAMEMASTERS))
                     .executes(context -> executeHome(context.getSource().getPlayer(), true)));
             spawn.then(net.minecraft.commands.Commands.literal("--force")
+                    .requires(net.minecraft.commands.Commands.hasPermission(
+                            net.minecraft.commands.Commands.LEVEL_GAMEMASTERS))
                     .executes(context -> executeSpawn(context.getSource().getPlayer(), true)));
         }
         dispatcher.register(home);
@@ -49,12 +54,20 @@ public final class Commands {
             case REGULAR -> config.regularCooldownMessage;
             case NONE -> throw new IllegalArgumentException("NONE has no cooldown message");
         };
-        return format(message.replace("{time}", Integer.toString(blocking.remainingSeconds())));
+        return message.replace("{time}", Integer.toString(blocking.remainingSeconds()));
     }
 
     static String passengerMessage(String playerName, boolean home) {
         return "§e" + playerName + " teleported you with their vehicle to "
                 + (home ? "their home" : "spawn") + ".";
+    }
+
+    static String teleportFailureMessage(TeleportService.Result result, String commandName) {
+        return result.partial() ? PARTIAL_TELEPORT : INTERNAL_ERROR.formatted(commandName);
+    }
+
+    static boolean continuesTeleportCompletion(TeleportService.Result result) {
+        return result.success() || result.partial();
     }
 
     private int executeHome(ServerPlayer player, boolean force) {
@@ -94,7 +107,8 @@ public final class Commands {
             }
             ServerLevel selectedLevel = target == SpawnDestination.Target.OVERWORLD
                     ? level.getServer().overworld() : level;
-            SpawnDestination.Result destination = SpawnDestination.find(player, selectedLevel, force);
+            SpawnDestination.Result destination = SpawnDestination.find(
+                    player, selectedLevel, force, config.rebuildEndPlatform);
             switch (destination.outcome()) {
                 case NO_WORLD_SPAWN -> send(player, "§cCannot determine world spawn.");
                 case VEHICLE_TOO_LARGE -> send(player, VEHICLE_TOO_LARGE);
@@ -119,15 +133,19 @@ public final class Commands {
         playEffects(player);
         DestinationSafety.loadDestinationChunks(destination.level(), destination.position());
         TeleportService.Result result = TeleportService.teleport(player, destination);
-        if (!result.success()) {
-            send(player, home ? config.unsafeHomeMessage : config.unsafeSpawnMessage);
+        if (!continuesTeleportCompletion(result)) {
+            send(player, teleportFailureMessage(result, home ? config.homeCommand : config.spawnCommand));
             return 0;
         }
 
         cooldowns.recordRegular(player.getUUID());
-        send(player, home ? config.homeSuccessMessage : config.spawnSuccessMessage);
         String passengerMessage = passengerMessage(player.getName().getString(), home);
         for (ServerPlayer passenger : result.passengerPlayers()) send(passenger, passengerMessage);
+        if (result.partial()) {
+            send(player, PARTIAL_TELEPORT);
+            return 0;
+        }
+        send(player, home ? config.homeSuccessMessage : config.spawnSuccessMessage);
         return 1;
     }
 
@@ -145,7 +163,7 @@ public final class Commands {
         player.sendSystemMessage(Component.literal(format(message)));
     }
 
-    private static String format(String message) {
+    static String format(String message) {
         return message.replace('&', '§');
     }
 }

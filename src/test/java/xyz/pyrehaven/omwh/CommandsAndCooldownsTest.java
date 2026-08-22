@@ -4,6 +4,7 @@ import com.mojang.brigadier.CommandDispatcher;
 import net.minecraft.SharedConstants;
 import net.minecraft.commands.CommandSourceStack;
 import net.minecraft.server.Bootstrap;
+import net.minecraft.server.permissions.LevelBasedPermissionSet;
 
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
@@ -11,10 +12,12 @@ import java.util.concurrent.atomic.AtomicLong;
 public final class CommandsAndCooldownsTest {
     public static void main(String[] args) {
         cooldownPolicyUsesUuidExpiryAndPriority();
+        disconnectCleanupAndSelfDamageClassification();
         forceSyntaxFollowsTheServerSetting();
         commandFeedbackUsesSpecificMessagesColorsAndPassengerDestination();
+        teleportOutcomesUseInternalFailureAndPartialPolicies();
         disabledSpawnFeedbackDoesNotClaimAWorldIsMissing();
-        System.out.println("CommandsAndCooldownsTest PASS (4 behavior groups)");
+        System.out.println("CommandsAndCooldownsTest PASS (5 behavior groups)");
     }
 
     private static void forceSyntaxFollowsTheServerSetting() {
@@ -27,6 +30,16 @@ public final class CommandsAndCooldownsTest {
                 "/home --force registered by default");
         check(enabledDispatcher.getRoot().getChild("spawn").getChild("--force") != null,
                 "/spawn --force registered by default");
+        var ordinary = net.minecraft.commands.Commands.createCompilationContext(LevelBasedPermissionSet.ALL);
+        var gamemaster = net.minecraft.commands.Commands.createCompilationContext(LevelBasedPermissionSet.GAMEMASTER);
+        check(!enabledDispatcher.getRoot().getChild("home").getChild("--force").canUse(ordinary),
+                "/home --force rejects ordinary players");
+        check(!enabledDispatcher.getRoot().getChild("spawn").getChild("--force").canUse(ordinary),
+                "/spawn --force rejects ordinary players");
+        check(enabledDispatcher.getRoot().getChild("home").getChild("--force").canUse(gamemaster),
+                "/home --force accepts gamemasters");
+        check(enabledDispatcher.getRoot().getChild("spawn").getChild("--force").canUse(gamemaster),
+                "/spawn --force accepts gamemasters");
 
         OmwhConfig disabled = new OmwhConfig();
         disabled.enableForceOverride = false;
@@ -77,15 +90,48 @@ public final class CommandsAndCooldownsTest {
                 "UUID state survives player replacement");
     }
 
+    private static void disconnectCleanupAndSelfDamageClassification() {
+        OmwhConfig config = new OmwhConfig();
+        Cooldowns cooldowns = new Cooldowns(config, () -> 1_000L);
+        UUID player = UUID.randomUUID();
+        cooldowns.recordIncomingDamageAllowedByOmwh(player, player);
+        check(cooldowns.blocking(player).type() == Cooldowns.Type.DAMAGE,
+                "self-inflicted damage uses the ordinary damage cooldown");
+        cooldowns.remove(player);
+        check(cooldowns.blocking(player).type() == Cooldowns.Type.NONE,
+                "disconnect removes the player's cooldown state");
+    }
+
     private static void commandFeedbackUsesSpecificMessagesColorsAndPassengerDestination() {
         OmwhConfig config = new OmwhConfig();
         check(Commands.cooldownMessage(config, new Cooldowns.Blocking(Cooldowns.Type.PVP, 12))
                 .contains("12 seconds"), "cooldown placeholder");
         config.regularCooldownMessage = "&cWait {time}";
-        check(Commands.cooldownMessage(config, new Cooldowns.Blocking(Cooldowns.Type.REGULAR, 3))
-                .equals("§cWait 3"), "ampersand colors");
+        String rawCooldown = Commands.cooldownMessage(
+                config, new Cooldowns.Blocking(Cooldowns.Type.REGULAR, 3));
+        check(rawCooldown.equals("&cWait 3"), "cooldown formatting is deferred to the send boundary");
+        check(Commands.format(rawCooldown).equals("§cWait 3"), "send boundary applies ampersand colors once");
         check(Commands.passengerMessage("Alex", true).contains("their home"), "home passenger message");
         check(Commands.passengerMessage("Alex", false).endsWith("to spawn."), "spawn passenger message");
+    }
+
+    private static void teleportOutcomesUseInternalFailureAndPartialPolicies() {
+        var partial = new TeleportService.Result(TeleportService.Outcome.PARTIAL, java.util.List.of());
+        var failed = new TeleportService.Result(TeleportService.Outcome.FAILED, java.util.List.of());
+        check(Commands.teleportFailureMessage(partial, "home").toLowerCase().contains("partially"),
+                "partial teleport gets a distinct warning");
+        check(Commands.continuesTeleportCompletion(partial),
+                "partial teleport continues through cooldown and passenger notifications");
+        check(Commands.teleportFailureMessage(failed, "home")
+                        .equals("§cInternal error executing /home. Check server log."),
+                "home teleport invariant failure gets command-specific internal error text");
+        check(Commands.teleportFailureMessage(failed, "spawn")
+                        .equals("§cInternal error executing /spawn. Check server log."),
+                "spawn teleport invariant failure gets command-specific internal error text");
+        check(!Commands.teleportFailureMessage(failed, "home").toLowerCase().contains("safe"),
+                "teleport invariant failure never exposes destination-safety wording");
+        check(!Commands.continuesTeleportCompletion(failed),
+                "failed teleport stops before cooldown and passenger notifications");
     }
 
     private static void disabledSpawnFeedbackDoesNotClaimAWorldIsMissing() {

@@ -163,17 +163,24 @@ public final class TeleportServiceTest {
         Object destination = new Object();
         Node root = validSource(source);
         AtomicInteger nullCalls = new AtomicInteger();
-        check(!attempt(root, source, destination, false, ignored -> {
+        TeleportService.Attempt<Node> nullAttempt = attempt(root, source, destination, false, ignored -> {
             nullCalls.incrementAndGet();
             return null;
-        }, new AtomicInteger()).success(), "null moved root rejected");
+        }, new AtomicInteger());
+        check(nullAttempt.outcome() == TeleportService.Outcome.FAILED,
+                "null result without a moved root is a failed invariant");
+        check(nullAttempt.entities().isEmpty(), "null result exposes no pre-mutation passenger entities");
         check(nullCalls.get() == 1, "null result never retried");
 
         AtomicInteger exceptionCalls = new AtomicInteger();
-        check(!attempt(root, source, destination, false, ignored -> {
+        TeleportService.Attempt<Node> exceptionAttempt = attempt(root, source, destination, false, ignored -> {
             exceptionCalls.incrementAndGet();
             throw new IllegalStateException("mutation");
-        }, new AtomicInteger()).success(), "mutation exception rejected");
+        }, new AtomicInteger());
+        check(exceptionAttempt.outcome() == TeleportService.Outcome.FAILED,
+                "mutation exception without a moved root is a failed invariant");
+        check(exceptionAttempt.entities().isEmpty(),
+                "mutation exception exposes no pre-mutation passenger entities");
         check(exceptionCalls.get() == 1, "exception never retried");
     }
 
@@ -193,7 +200,8 @@ public final class TeleportServiceTest {
             teleports.incrementAndGet();
             return node;
         }, new AtomicInteger());
-        check(!attempt.success(), behavior + " rejected");
+        check(attempt.outcome() == TeleportService.Outcome.FAILED, behavior + " rejected as failed");
+        check(attempt.entities().isEmpty(), behavior + " exposes no passenger entities");
         check(teleports.get() == 0, behavior + " rejected before mutation");
     }
 
@@ -206,7 +214,8 @@ public final class TeleportServiceTest {
             teleports.incrementAndGet();
             return teleporter.apply(node);
         }, clears);
-        check(!attempt.success(), behavior + " rejected");
+        check(attempt.outcome() == TeleportService.Outcome.PARTIAL,
+                behavior + " reported as a partial post-mutation failure");
         check(teleports.get() == 1, behavior + " follows exactly one mutation");
         check(clears.get() == 0, behavior + " suppresses completion mutation");
     }

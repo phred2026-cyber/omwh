@@ -3,7 +3,11 @@ package xyz.pyrehaven.omwh;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityDimensions;
+import net.minecraft.world.entity.Pose;
 import net.minecraft.world.level.block.BedBlock;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
 import net.minecraft.world.phys.shapes.CollisionContext;
@@ -15,6 +19,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.function.Function;
 import java.util.function.LongConsumer;
+import java.util.function.LongPredicate;
 
 public final class DestinationSafety {
     static final double HOME_HORIZONTAL_MARGIN = 0.5;
@@ -69,6 +74,13 @@ public final class DestinationSafety {
         }
     }
 
+    static boolean allChunksLoaded(CellRange cells, LongPredicate loaded) {
+        for (long chunk : involvedChunks(cells)) {
+            if (!loaded.test(chunk)) return false;
+        }
+        return true;
+    }
+
     static boolean collisionFree(Bounds occupied, CellRange owners,
                                  Function<Cell, List<Bounds>> collisionShapes) {
         for (int x = owners.minX; x <= owners.maxX; x++) {
@@ -91,15 +103,21 @@ public final class DestinationSafety {
         return collisionFree(occupied, owners, collisionShapes);
     }
 
-    static boolean isHazard(String descriptionId) {
-        return descriptionId.contains("fire") || descriptionId.contains("lava")
-                || descriptionId.contains("magma") || descriptionId.contains("cactus")
-                || descriptionId.contains("sweet_berry_bush") || descriptionId.contains("wither_rose")
-                || descriptionId.contains("powder_snow");
+    static boolean loadedAndCollisionFree(Bounds occupied, LongPredicate loaded,
+                                          Function<Cell, List<Bounds>> collisionShapes) {
+        CellRange owners = collisionOwnerCells(occupied);
+        return allChunksLoaded(owners, loaded) && collisionFree(occupied, owners, collisionShapes);
     }
 
-    static boolean isUnsafeHomeCell(boolean hasFluid, String descriptionId) {
-        return hasFluid || isHazard(descriptionId);
+    static boolean isHazard(Block block) {
+        return block == Blocks.FIRE || block == Blocks.SOUL_FIRE || block == Blocks.LAVA
+                || block == Blocks.MAGMA_BLOCK || block == Blocks.CACTUS
+                || block == Blocks.SWEET_BERRY_BUSH || block == Blocks.WITHER_ROSE
+                || block == Blocks.POWDER_SNOW;
+    }
+
+    static boolean isUnsafeHomeCell(boolean hasFluid, Block block) {
+        return hasFluid || isHazard(block);
     }
 
     static CellRange homeHazardCells(Bounds occupied) {
@@ -109,14 +127,18 @@ public final class DestinationSafety {
     }
 
     static boolean unmountedHomeFits(Entity player, ServerLevel level, Vec3 position) {
-        AABB occupiedBox = player.getBoundingBox().move(position.subtract(player.position()));
-        Bounds occupied = bounds(occupiedBox);
+        Bounds occupied = standingPlayerBounds(position, player.getDimensions(Pose.STANDING));
+        AABB occupiedBox = box(occupied);
         if (!withinBuildHeight(occupied, level.getMinY(), level.getMaxY())
                 || !level.getWorldBorder().isWithinBounds(occupiedBox)) return false;
 
         CellRange checked = homeHazardCells(occupied);
         preloadInvolvedChunks(checked, new HashSet<>(), chunk -> loadChunk(level, chunk));
         return !containsHomeHazard(level, checked);
+    }
+
+    static Bounds standingPlayerBounds(Vec3 position, EntityDimensions standingDimensions) {
+        return bounds(standingDimensions.makeBoundingBox(position));
     }
 
     static HomeFit mountedHomeFit(Entity root, ServerLevel level, Vec3 position, BlockPos homeBlock) {
@@ -155,15 +177,14 @@ public final class DestinationSafety {
                 for (int z = checked.minZ; z <= checked.maxZ; z++) {
                     BlockPos blockPos = new BlockPos(x, y, z);
                     var state = level.getBlockState(blockPos);
-                    if (isUnsafeHomeCell(!state.getFluidState().isEmpty(),
-                            state.getBlock().getDescriptionId())) return true;
+                    if (isUnsafeHomeCell(!state.getFluidState().isEmpty(), state.getBlock())) return true;
                 }
             }
         }
         return false;
     }
 
-    static boolean spawnFits(ServerLevel level, BlockPos feet, int width, int height, Set<Long> loadedChunks) {
+    static boolean spawnFits(ServerLevel level, BlockPos feet, int width, int height) {
         double centerOffset = width % 2 == 0 ? 0.0 : 0.5;
         Footprint footprint = footprint(feet.getX() + centerOffset, feet.getZ() + centerOffset, width);
         Bounds occupied = new Bounds(footprint.minX, feet.getY(), footprint.minZ,
@@ -172,7 +193,10 @@ public final class DestinationSafety {
         if (!withinBuildHeight(occupied, level.getMinY(), level.getMaxY())
                 || !level.getWorldBorder().isWithinBounds(occupiedBox)) return false;
 
-        if (!preloadAndCheckCollisions(occupied, loadedChunks, chunk -> loadChunk(level, chunk),
+        CellRange owners = collisionOwnerCells(occupied);
+        if (!allChunksLoaded(owners, chunk -> level.getChunkSource().getChunkNow(
+                (int) (chunk >> 32), (int) chunk) != null)
+                || !collisionFree(occupied, owners,
                 cell -> collisionShapes(level, cell, CollisionContext.empty()))) return false;
         for (int x = footprint.minX; x <= footprint.maxX; x++) {
             for (int z = footprint.minZ; z <= footprint.maxZ; z++) {
@@ -180,12 +204,12 @@ public final class DestinationSafety {
                 var support = level.getBlockState(supportPos);
                 if (!support.getFluidState().isEmpty()
                         || !support.isCollisionShapeFullBlock(level, supportPos)
-                        || isHazard(support.getBlock().getDescriptionId())) return false;
+                        || isHazard(support.getBlock())) return false;
                 for (int y = 0; y < height; y++) {
                     BlockPos occupiedPos = new BlockPos(x, feet.getY() + y, z);
                     var state = level.getBlockState(occupiedPos);
                     if (!state.getFluidState().isEmpty()
-                            || isHazard(state.getBlock().getDescriptionId())) return false;
+                            || isHazard(state.getBlock())) return false;
                 }
             }
         }
@@ -193,22 +217,37 @@ public final class DestinationSafety {
     }
 
     static boolean endFits(ServerLevel level, Entity root, Vec3 position, BlockPos platformAnchor,
-                           Set<Long> loadedChunks) {
+                           boolean rebuildPlatform) {
         AABB occupiedBox = root.getBoundingBox().move(position.subtract(root.position()));
         Bounds occupied = bounds(occupiedBox);
         if (!withinBuildHeight(occupied, level.getMinY(), level.getMaxY())
                 || !level.getWorldBorder().isWithinBounds(occupiedBox)) return false;
 
         CollisionContext context = CollisionContext.of(root);
-        if (!preloadAndCheckCollisions(occupied, loadedChunks, chunk -> loadChunk(level, chunk),
-                cell -> simulatedEndCollisionShapes(level, cell, platformAnchor, context))) return false;
+        if (!loadedAndCollisionFree(occupied, chunk -> level.getChunkSource().getChunkNow(
+                        (int) (chunk >> 32), (int) chunk) != null,
+                cell -> rebuildPlatform
+                        ? simulatedEndCollisionShapes(level, cell, platformAnchor, context)
+                        : collisionShapes(level, cell, context))) return false;
         int supportY = floor(occupied.minY) - 1;
         for (int x = floor(occupied.minX); x <= floor(Math.nextDown(occupied.maxX)); x++) {
             for (int z = floor(occupied.minZ); z <= floor(Math.nextDown(occupied.maxZ)); z++) {
-                if (!isSimulatedPlatformObsidian(new Cell(x, supportY, z), platformAnchor)) return false;
+                if (rebuildPlatform) {
+                    if (!isSimulatedPlatformObsidian(new Cell(x, supportY, z), platformAnchor)) return false;
+                    continue;
+                }
+                BlockPos supportPos = new BlockPos(x, supportY, z);
+                var support = level.getBlockState(supportPos);
+                if (!isSafeEndSupport(!support.getFluidState().isEmpty(),
+                        support.isCollisionShapeFullBlock(level, supportPos),
+                        isHazard(support.getBlock()))) return false;
             }
         }
         return true;
+    }
+
+    static boolean isSafeEndSupport(boolean hasFluid, boolean fullBlock, boolean hazard) {
+        return !hasFluid && fullBlock && !hazard;
     }
 
     static void loadDestinationChunks(ServerLevel level, Vec3 position) {
