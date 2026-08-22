@@ -33,13 +33,9 @@ public final class Commands {
                 .requires(source -> source.getEntity() instanceof ServerPlayer)
                 .executes(context -> executeSpawn(context.getSource().getPlayer(), false));
         if (config.enableForceOverride) {
-            home.then(net.minecraft.commands.Commands.literal("--force")
-                    .requires(net.minecraft.commands.Commands.hasPermission(
-                            net.minecraft.commands.Commands.LEVEL_GAMEMASTERS))
+            home.then(net.minecraft.commands.Commands.literal("force")
                     .executes(context -> executeHome(context.getSource().getPlayer(), true)));
-            spawn.then(net.minecraft.commands.Commands.literal("--force")
-                    .requires(net.minecraft.commands.Commands.hasPermission(
-                            net.minecraft.commands.Commands.LEVEL_GAMEMASTERS))
+            spawn.then(net.minecraft.commands.Commands.literal("force")
                     .executes(context -> executeSpawn(context.getSource().getPlayer(), true)));
         }
         dispatcher.register(home);
@@ -62,6 +58,11 @@ public final class Commands {
                 + (home ? "their home" : "spawn") + ".";
     }
 
+    static String unsafeMessage(String configuredMessage, String commandName, boolean forceEnabled) {
+        if (!forceEnabled) return configuredMessage;
+        return configuredMessage + "\n§eUse /" + commandName + " force to teleport anyway.";
+    }
+
     static String teleportFailureMessage(TeleportService.Result result, String commandName) {
         return result.partial() ? PARTIAL_TELEPORT : INTERNAL_ERROR.formatted(commandName);
     }
@@ -80,7 +81,8 @@ public final class Commands {
                 case NO_HOME -> send(player, config.noHomepointMessage);
                 case CROSS_DIMENSION -> send(player, config.crossDimensionMessage);
                 case VEHICLE_TOO_LARGE -> send(player, VEHICLE_TOO_LARGE);
-                case UNSAFE -> send(player, config.unsafeHomeMessage);
+                case UNSAFE -> send(player, unsafeMessage(
+                        config.unsafeHomeMessage, config.homeCommand, config.enableForceOverride));
                 case ACCEPT -> { return teleport(player, destination.destination(), true); }
             }
         } catch (RuntimeException failure) {
@@ -112,7 +114,8 @@ public final class Commands {
             switch (destination.outcome()) {
                 case NO_WORLD_SPAWN -> send(player, "§cCannot determine world spawn.");
                 case VEHICLE_TOO_LARGE -> send(player, VEHICLE_TOO_LARGE);
-                case UNSAFE -> send(player, config.unsafeSpawnMessage);
+                case UNSAFE -> send(player, unsafeMessage(
+                        config.unsafeSpawnMessage, config.spawnCommand, config.enableForceOverride));
                 case ACCEPT -> { return teleport(player, destination.destination(), false); }
             }
         } catch (RuntimeException failure) {

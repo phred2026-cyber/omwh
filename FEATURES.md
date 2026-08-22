@@ -14,9 +14,10 @@ This file is the accepted gameplay contract for the OMWH 1.2.0 release candidate
 ## `/home`
 
 - The configured home command defaults to `/home`.
-- `/home --force` uses the same authoritative vanilla respawn position while deliberately bypassing
+- `/home force` uses the same authoritative vanilla respawn position while deliberately bypassing
   destination-safety checks. It remains subject to player-source, cooldown, missing-home, and
-  dimension-admission rules, and exists only while `enableForceOverride` is enabled. It also requires gamemaster-level operator permission.
+  dimension-admission rules, and exists only while `enableForceOverride` is enabled. Every player
+  who can use `/home` can use this child command.
 - A home exists only when Minecraft has a valid configured respawn point for the player: a bed, a charged respawn anchor, or a forced respawn point.
 - OMWH asks Minecraft for its normal respawn placement without consuming a respawn-anchor charge.
 - A missing or destroyed respawn point is not replaced with world spawn.
@@ -32,8 +33,8 @@ This file is the accepted gameplay contract for the OMWH 1.2.0 release candidate
 ## `/spawn`
 
 - The configured spawn command defaults to `/spawn`.
-- `/spawn --force` uses the raw spawn block-center feet position of the destination selected by the same routing settings as normal `/spawn`, without running the ordinary safe-location search. In the End it uses the built-in End arrival position. It rebuilds the obsidian platform only when `rebuildEndPlatform` is enabled. It remains subject to player-source and cooldown rules, and exists only while
-  `enableForceOverride` is enabled. It also requires gamemaster-level operator permission.
+- `/spawn force` uses the raw spawn block-center feet position of the destination selected by the same routing settings as normal `/spawn`, without running the ordinary safe-location search. In the End it uses the built-in End arrival position. It rebuilds the obsidian platform only when `rebuildEndPlatform` is enabled. It remains subject to player-source and cooldown rules, and exists only while
+  `enableForceOverride` is enabled. Every player who can use `/spawn` can use this child command.
 - In the Overworld, `/spawn` uses Overworld spawn only while `enableOverworldSpawn` is enabled. If it is disabled, the command is denied without selecting another dimension.
 - In the Nether, enabled `enableNetherSpawn` always selects Nether spawn, regardless of `enableCrossDimensionTeleport`.
 - In the End, enabled `enableEndSpawn` always selects the End arrival destination, regardless of `enableCrossDimensionTeleport`.
@@ -46,7 +47,7 @@ This file is the accepted gameplay contract for the OMWH 1.2.0 release candidate
 ## Shared destination safety
 
 `DestinationSafety` owns the safety primitives used by both destination policies. Normal command
-forms apply their destination policies; the literal `--force` forms deliberately skip those safety
+forms apply their destination policies; the literal `force` children deliberately skip those safety
 checks and no other admission rule.
 
 - Unmounted `/home` additionally rejects fluids and hazards in the translated player space or its
@@ -110,7 +111,7 @@ Cooldown state is keyed by player UUID and owned only by `Cooldowns`.
 | `joinCooldownSeconds` | `30` | Join cooldown duration; `0` disables it |
 | `playTeleportSound` | `true` | Enables the pre-mutation teleport-attempt sound |
 | `spawnTeleportParticles` | `true` | Enables pre-mutation teleport-attempt particles |
-| `enableForceOverride` | `true` | Registers the operator-only literal `--force` form for both commands |
+| `enableForceOverride` | `true` | Registers the player-usable literal `force` child for both commands |
 | `enableCrossDimensionTeleport` | `true` | Allows valid cross-dimension homes and eligible Nether/End-to-Overworld spawn routes |
 | `enableOverworldSpawn` | `true` | Allows Overworld spawn as the current or selected destination |
 | `enableNetherSpawn` | `true` | Allows Nether spawn while the player is in the Nether |
@@ -137,6 +138,14 @@ The configuration path is not strict whole-document schema validation: unknown k
 - Destination discovery and the checks required by that command complete before teleport mutation begins.
 - No command catches an invariant violation and retries through another destination or mutation path.
 - Unexpected command exceptions are logged with context, send the command user an internal-error message, and return command failure.
-- Destination-safety denials use the configured unsafe-home or unsafe-spawn message. Teleport invariant failures with no returned moved root use the command-specific internal-error message. Neither begins the regular cooldown or notifies passengers. Reconciliation failures after a non-null moved root use a distinct partial-teleport warning, notify trustworthy moved player passengers, and begin the regular cooldown.
+- Destination-safety denials use the configured unsafe-home or unsafe-spawn message. When
+  `enableForceOverride` is enabled, only these denials add a second line pointing to the configured
+  command name followed by `force`. Disabled force commands are never advertised. Vehicle-too-large,
+  missing-home, cross-dimension, disabled-spawn, unavailable-world, cooldown, mutation/internal,
+  partial, and success feedback do not include this guidance.
+- Teleport invariant failures with no returned moved root use the command-specific internal-error
+  message. They do not begin the regular cooldown or notify passengers. Reconciliation failures after
+  a non-null moved root use a distinct partial-teleport warning, notify trustworthy moved player
+  passengers, and begin the regular cooldown.
 - `/spawn` reports an explicit failure when it cannot determine the current world or read the selected world's spawn. It never substitutes fabricated fallback coordinates.
 - A successful result means the recursive root teleport returned an entity, the captured attachments remained intact, success feedback was sent, and the regular cooldown was recorded. A possible partial result is not success, but it still records the cooldown because movement may already have happened.

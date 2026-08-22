@@ -4,7 +4,7 @@
 
 - `/home` can now use a valid bed or respawn anchor in another dimension when the server allows cross-dimension travel.
 - Server owners can control Overworld, Nether, and End `/spawn` destinations separately.
-- Added `/home --force` and `/spawn --force` for operators. These commands bypass destination safety, but they still obey cooldowns, home availability, and dimension settings.
+- Added `/home force` and `/spawn force` for every player who can use the normal commands. Force bypasses destination safety, but it still obeys cooldowns, home availability, dimension and spawn settings, world availability, and teleport failures. When a normal command refuses an unsafe destination, it points players to the configured force command if force is enabled.
 - End `/spawn` no longer rebuilds the obsidian arrival platform by default. Server owners can enable `rebuildEndPlatform` when they want Minecraft's platform recreated.
 - Normal `/home` now refuses fluids and exact hazardous blocks at the destination before moving the player or mounted group.
 - `/spawn` now uses a bounded nearest-first search in loaded chunks, avoiding broad terrain generation from a player command.

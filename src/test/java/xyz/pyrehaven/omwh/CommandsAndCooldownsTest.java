@@ -26,28 +26,32 @@ public final class CommandsAndCooldownsTest {
         OmwhConfig enabled = new OmwhConfig();
         CommandDispatcher<CommandSourceStack> enabledDispatcher = new CommandDispatcher<>();
         new Commands(enabled, new Cooldowns(enabled, () -> 0L)).register(enabledDispatcher);
-        check(enabledDispatcher.getRoot().getChild("home").getChild("--force") != null,
-                "/home --force registered by default");
-        check(enabledDispatcher.getRoot().getChild("spawn").getChild("--force") != null,
-                "/spawn --force registered by default");
+        check(enabledDispatcher.getRoot().getChild("home").getChild("force") != null,
+                "/home force registered by default");
+        check(enabledDispatcher.getRoot().getChild("spawn").getChild("force") != null,
+                "/spawn force registered by default");
+        check(enabledDispatcher.getRoot().getChild("home").getChild("--force") == null,
+                "legacy dashed home force syntax absent");
+        check(enabledDispatcher.getRoot().getChild("spawn").getChild("--force") == null,
+                "legacy dashed spawn force syntax absent");
         var ordinary = net.minecraft.commands.Commands.createCompilationContext(LevelBasedPermissionSet.ALL);
         var gamemaster = net.minecraft.commands.Commands.createCompilationContext(LevelBasedPermissionSet.GAMEMASTER);
-        check(!enabledDispatcher.getRoot().getChild("home").getChild("--force").canUse(ordinary),
-                "/home --force rejects ordinary players");
-        check(!enabledDispatcher.getRoot().getChild("spawn").getChild("--force").canUse(ordinary),
-                "/spawn --force rejects ordinary players");
-        check(enabledDispatcher.getRoot().getChild("home").getChild("--force").canUse(gamemaster),
-                "/home --force accepts gamemasters");
-        check(enabledDispatcher.getRoot().getChild("spawn").getChild("--force").canUse(gamemaster),
-                "/spawn --force accepts gamemasters");
+        check(enabledDispatcher.getRoot().getChild("home").getChild("force").canUse(ordinary),
+                "/home force accepts ordinary players");
+        check(enabledDispatcher.getRoot().getChild("spawn").getChild("force").canUse(ordinary),
+                "/spawn force accepts ordinary players");
+        check(enabledDispatcher.getRoot().getChild("home").getChild("force").canUse(gamemaster),
+                "/home force accepts gamemasters");
+        check(enabledDispatcher.getRoot().getChild("spawn").getChild("force").canUse(gamemaster),
+                "/spawn force accepts gamemasters");
 
         OmwhConfig disabled = new OmwhConfig();
         disabled.enableForceOverride = false;
         CommandDispatcher<CommandSourceStack> disabledDispatcher = new CommandDispatcher<>();
         new Commands(disabled, new Cooldowns(disabled, () -> 0L)).register(disabledDispatcher);
-        check(disabledDispatcher.getRoot().getChild("home").getChild("--force") == null,
+        check(disabledDispatcher.getRoot().getChild("home").getChild("force") == null,
                 "disabled /home force syntax absent");
-        check(disabledDispatcher.getRoot().getChild("spawn").getChild("--force") == null,
+        check(disabledDispatcher.getRoot().getChild("spawn").getChild("force") == null,
                 "disabled /spawn force syntax absent");
     }
 
@@ -113,6 +117,22 @@ public final class CommandsAndCooldownsTest {
         check(Commands.format(rawCooldown).equals("§cWait 3"), "send boundary applies ampersand colors once");
         check(Commands.passengerMessage("Alex", true).contains("their home"), "home passenger message");
         check(Commands.passengerMessage("Alex", false).endsWith("to spawn."), "spawn passenger message");
+        config.homeCommand = "return";
+        config.spawnCommand = "hub";
+        config.unsafeHomeMessage = "§cBlocked home.";
+        config.unsafeSpawnMessage = "§cBlocked spawn.";
+        check(Commands.unsafeMessage(config.unsafeHomeMessage, config.homeCommand, true)
+                        .equals("§cBlocked home.\n§eUse /return force to teleport anyway."),
+                "unsafe home advertises the configured force command");
+        check(Commands.unsafeMessage(config.unsafeSpawnMessage, config.spawnCommand, true)
+                        .equals("§cBlocked spawn.\n§eUse /hub force to teleport anyway."),
+                "unsafe spawn advertises the configured force command");
+        check(Commands.unsafeMessage(config.unsafeHomeMessage, config.homeCommand, false)
+                        .equals(config.unsafeHomeMessage),
+                "unsafe home does not advertise a disabled force command");
+        check(Commands.unsafeMessage(config.unsafeSpawnMessage, config.spawnCommand, false)
+                        .equals(config.unsafeSpawnMessage),
+                "unsafe spawn does not advertise a disabled force command");
     }
 
     private static void teleportOutcomesUseInternalFailureAndPartialPolicies() {

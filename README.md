@@ -36,7 +36,9 @@ The whole group stays attached during the teleport. If the destination does not 
 
 ### Force commands
 
-Server owners can enable `/home --force` and `/spawn --force`. Only operators with gamemaster-level command permission can use them. These forms skip the normal destination safety check, but they do not bypass cooldowns, missing homes, disabled dimensions, or other command rules.
+Server owners can enable `/home force` and `/spawn force`. Any player who can use `/home` or `/spawn` can use its force form. Force skips only the destination safety check; cooldowns, missing homes, dimension routing, disabled spawn destinations, unavailable worlds, and teleport failures still apply.
+
+When a normal command refuses an unsafe destination, OMWH shows the configured unsafe message. If force is enabled, it also tells the player which configured command to use with `force`.
 
 ## Cooldowns
 
@@ -77,7 +79,7 @@ Edit `config/omwh.json` after the first launch.
 | `joinCooldownSeconds` | `30` | Cooldown after joining the server |
 | `playTeleportSound` | `true` | Play the teleport sound |
 | `spawnTeleportParticles` | `true` | Show teleport particles |
-| `enableForceOverride` | `true` | Enable `/home --force` and `/spawn --force` |
+| `enableForceOverride` | `true` | Enable `/home force` and `/spawn force` for players who can use the parent commands |
 | `enableCrossDimensionTeleport` | `true` | Allow valid cross-dimension homes and eligible spawn travel |
 | `enableOverworldSpawn` | `true` | Allow the Overworld spawn destination |
 | `enableNetherSpawn` | `true` | Allow the Nether spawn destination |
