@@ -31,10 +31,12 @@ public final class DestinationsTest {
         spawnSearchIsBoundedDeterministicAndComplete();
         spawnReadFailureNeverInventsCoordinates();
         spawnSearchUsesOneBoundedLoadedChunkPass();
+        foreignNetherSpawnUsesSeaLevelAndSearchesTheWholeShorePlane();
+        spawnSearchReachesUsefulHorizontalRadiusWithinItsColumnBudget();
         spawnFailureDistinguishesOversizedVehicle();
         collisionOwnersIncludeShellAndEveryInvolvedChunk();
         safetyOwnsFootprintsHazardsAndFiveByFiveChunkPreparation();
-        System.out.println("DestinationsTest PASS (12 behavior groups)");
+        System.out.println("DestinationsTest PASS (14 behavior groups)");
     }
 
     private static void homePolicyAllowsOnlyAcceptedRespawnsAndOneBedAlternate() {
@@ -275,9 +277,9 @@ public final class DestinationsTest {
                 offset -> { probes.add("player:" + offset.x()); return offset.x() == 0; });
         check(selection.outcome() == SpawnDestination.Outcome.VEHICLE_TOO_LARGE,
                 "bounded pass retains mounted diagnostic");
-        check(selection.candidatesVisited() == 2 && selection.rootChecks() == 2
-                        && selection.playerChecks() == 2,
-                "structural counters prove the search cap and one diagnostic per candidate");
+        check(selection.columnsVisited() == 2 && selection.candidatesVisited() == 2
+                        && selection.rootChecks() == 2 && selection.playerChecks() == 2,
+                "structural counters prove the column cap and one diagnostic per candidate");
         check(probes.equals(List.of("root:0", "player:0", "root:1", "player:1")),
                 "root and player diagnostics share one nearest-first pass");
 
@@ -286,6 +288,60 @@ public final class DestinationsTest {
         check(!DestinationSafety.allChunksLoaded(owners, chunk ->
                 loadedChecks.incrementAndGet() == 1), "candidate probing rejects an unloaded owner chunk");
         check(loadedChecks.get() == 2, "loaded-chunk probe stops at the first missing chunk");
+    }
+
+    private static void foreignNetherSpawnUsesSeaLevelAndSearchesTheWholeShorePlane() {
+        BlockPos overworldSpawn = new BlockPos(354, 49, -901);
+        BlockPos netherCenter = SpawnDestination.searchCenter(
+                overworldSpawn, false, SpawnDestination.Dimension.NETHER, 32, -64, 128);
+        check(netherCenter.equals(new BlockPos(354, 32, -901)),
+                "foreign Overworld spawn Y is replaced by the Nether generator sea level");
+        check(SpawnDestination.searchCenter(
+                        overworldSpawn, true, SpawnDestination.Dimension.NETHER, 32, -64, 128)
+                        .equals(overworldSpawn),
+                "dimension-owned Nether spawn Y remains authoritative");
+
+        SpawnDestination.Offset shore = new SpawnDestination.Offset(64, 0, 64);
+        SpawnDestination.Selection selection = SpawnDestination.select(
+                SpawnDestination.offsets(SpawnDestination.RADIUS, 0, 0),
+                SpawnDestination.HORIZONTAL_COLUMNS,
+                shore::equals, null);
+        check(selection.outcome() == SpawnDestination.Outcome.ACCEPT && selection.offset().equals(shore),
+                "Nether shore plane covers every configured horizontal column before vertical fallback");
+        check(selection.columnsVisited() == SpawnDestination.HORIZONTAL_COLUMNS
+                        && selection.candidatesVisited() == SpawnDestination.HORIZONTAL_COLUMNS,
+                "whole shore plane has an exact one-check-per-column bound");
+    }
+
+    private static void spawnSearchReachesUsefulHorizontalRadiusWithinItsColumnBudget() {
+        SpawnDestination.Offset shore = new SpawnDestination.Offset(20, 0, 0);
+        SpawnDestination.Selection selection = SpawnDestination.select(
+                SpawnDestination.offsets(SpawnDestination.RADIUS,
+                        SpawnDestination.MIN_Y_OFFSET, SpawnDestination.MAX_Y_OFFSET),
+                SpawnDestination.MAX_CANDIDATES,
+                shore::equals, null);
+        int verticalPositions = SpawnDestination.MAX_Y_OFFSET - SpawnDestination.MIN_Y_OFFSET + 1;
+
+        check(selection.outcome() == SpawnDestination.Outcome.ACCEPT,
+                "safe Nether shore beyond the old eleven-block envelope is inspected");
+        check(selection.offset().equals(shore), "the distant safe shore is selected deterministically");
+        check(selection.columnsVisited() <= SpawnDestination.MAX_CANDIDATES,
+                "the search never exceeds its horizontal-column budget");
+        check(selection.candidatesVisited() <= SpawnDestination.MAX_CANDIDATES * verticalPositions,
+                "the horizontal-column budget retains a hard placement-check bound");
+        check(selection.rootChecks() == selection.candidatesVisited() && selection.playerChecks() == 0,
+                "distant search preserves structural counters");
+
+        SpawnDestination.Selection exhausted = SpawnDestination.select(
+                SpawnDestination.offsets(SpawnDestination.RADIUS,
+                        SpawnDestination.MIN_Y_OFFSET, SpawnDestination.MAX_Y_OFFSET),
+                SpawnDestination.MAX_CANDIDATES, offset -> false, offset -> false);
+        check(exhausted.columnsVisited() == SpawnDestination.MAX_CANDIDATES,
+                "exhausted production search visits exactly its column budget");
+        check(exhausted.candidatesVisited() == SpawnDestination.MAX_CANDIDATES * verticalPositions
+                        && exhausted.rootChecks() == exhausted.candidatesVisited()
+                        && exhausted.playerChecks() == exhausted.candidatesVisited(),
+                "exhausted production search has an exact hard bound for the shared root and player pass");
     }
 
     private static void spawnFailureDistinguishesOversizedVehicle() {
@@ -377,11 +433,12 @@ public final class DestinationsTest {
                 for (int y = minY; y <= maxY; y++) result.add(new SpawnDestination.Offset(x, y, z));
             }
         }
-        result.sort(Comparator.comparingLong(SpawnDestination.Offset::distanceSquared)
-                .thenComparingInt(offset -> Math.abs(offset.y()))
-                .thenComparingInt(SpawnDestination.Offset::y)
+        result.sort(Comparator.comparingLong((SpawnDestination.Offset offset) ->
+                        (long) offset.x() * offset.x() + (long) offset.z() * offset.z())
                 .thenComparingInt(SpawnDestination.Offset::x)
-                .thenComparingInt(SpawnDestination.Offset::z));
+                .thenComparingInt(SpawnDestination.Offset::z)
+                .thenComparingInt(offset -> Math.abs(offset.y()))
+                .thenComparingInt(SpawnDestination.Offset::y));
         return result;
     }
 

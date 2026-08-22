@@ -57,10 +57,27 @@ public final class TeleportService {
                 entity -> entity.teleport(new TeleportTransition(destination.level(), destination.position(),
                         Vec3.ZERO, destination.yaw(), destination.pitch(), TeleportTransition.DO_NOTHING)),
                 entity -> entity.setDeltaMovement(Vec3.ZERO));
+        refreshTracking(attempt, ENTITY_TREE,
+                entity -> destination.level().getChunkSource().move((ServerPlayer) entity),
+                entity -> {
+                    destination.level().getChunkSource().removeEntity(entity);
+                    destination.level().getChunkSource().addEntity(entity);
+                });
         List<ServerPlayer> passengers = passengerPlayers(attempt.entities(), ENTITY_TREE, source).stream()
                 .map(entity -> (ServerPlayer) entity)
                 .toList();
         return new Result(attempt.outcome(), passengers);
+    }
+
+    static <T> void refreshTracking(Attempt<T> attempt, EntityTree<T> tree,
+                                    Consumer<T> movePlayer, Consumer<T> retrackEntity) {
+        if (!attempt.success()) return;
+        for (T entity : attempt.entities()) {
+            if (tree.isPlayer(entity)) movePlayer.accept(entity);
+        }
+        for (T entity : attempt.entities()) {
+            if (!tree.isPlayer(entity)) retrackEntity.accept(entity);
+        }
     }
 
     static <T> List<T> passengerPlayers(List<T> movedEntities, EntityTree<T> tree, T commandPlayer) {

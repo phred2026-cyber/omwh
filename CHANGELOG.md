@@ -7,8 +7,8 @@
 - Added `/home force` and `/spawn force` for every player who can use the normal commands. Force bypasses destination safety, but it still obeys cooldowns, home availability, dimension and spawn settings, world availability, and teleport failures. When a normal command refuses an unsafe destination, it points players to the configured force command if force is enabled.
 - End `/spawn` no longer rebuilds the obsidian arrival platform by default. Server owners can enable `rebuildEndPlatform` when they want Minecraft's platform recreated.
 - Normal `/home` now refuses fluids and exact hazardous blocks at the destination before moving the player or mounted group.
-- `/spawn` now uses a bounded nearest-first search in loaded chunks, avoiding broad terrain generation from a player command.
-- Vehicles, riders, and nested passengers stay together during allowed same-dimension and cross-dimension teleports. If Minecraft reports a possible partial move, OMWH warns the group and applies the normal cooldown before another attempt.
+- Nether `/spawn` now keeps the world spawn X/Z but searches from the Nether generator's lava-sea level when the saved spawn belongs to the Overworld. It checks the full 64-block shore plane before its bounded nearby-height search, so an unrelated Overworld Y-coordinate or the old vertical budget cannot hide safe ground.
+- Vehicles, riders, and nested passengers stay together during allowed same-dimension and cross-dimension teleports. After a verified move, OMWH refreshes Minecraft's entity tracking so boats and riders remain visible and usable without relogging. If Minecraft reports a possible partial move, OMWH warns the group and applies the normal cooldown before another attempt.
 - Invalid known configuration values stop startup with a specific error. Existing files may omit newer fields, but quoted booleans or numbers, negative cooldowns, invalid command names, and malformed JSON must be corrected.
 - Replace the old OMWH jar when updating. Leaving both jars in the `mods` folder causes Fabric Loader to reject the duplicate mod ID.
 

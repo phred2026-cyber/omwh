@@ -15,8 +15,9 @@ public final class TeleportServiceTest {
         invalidSourceTreesAreRejectedBeforeMutation();
         incompleteOrInvalidMovedTreesFailAfterOneMutation();
         nullAndExceptionFailuresNeverRetry();
+        trackingRefreshRunsOncePerReconciledEntityAndNeverOnFailure();
         reconciledPlayerNotificationsExcludeTheCommandPlayer();
-        System.out.println("TeleportServiceTest PASS (6 behavior groups)");
+        System.out.println("TeleportServiceTest PASS (7 behavior groups)");
     }
 
     private static void sameDimensionUsesOneRootMutationAndPreservesEveryIdentity() {
@@ -182,6 +183,32 @@ public final class TeleportServiceTest {
         check(exceptionAttempt.entities().isEmpty(),
                 "mutation exception exposes no pre-mutation passenger entities");
         check(exceptionCalls.get() == 1, "exception never retried");
+    }
+
+    private static void trackingRefreshRunsOncePerReconciledEntityAndNeverOnFailure() {
+        Object destination = new Object();
+        Node vehicle = Node.entity("vehicle", destination);
+        Node branch = Node.entity("branch", destination);
+        Node driver = Node.player("driver", destination);
+        Node rider = Node.player("rider", destination);
+        List<Node> moved = List.of(vehicle, branch, driver, rider);
+        List<String> refreshes = new ArrayList<>();
+
+        TeleportService.refreshTracking(
+                new TeleportService.Attempt<>(TeleportService.Outcome.SUCCESS, moved), NODE_TREE,
+                node -> refreshes.add("player:" + node.name),
+                node -> refreshes.add("entity:" + node.name));
+        check(refreshes.equals(List.of("player:driver", "player:rider", "entity:vehicle", "entity:branch")),
+                "player chunk views refresh before the reconciled parent-first entity tree");
+
+        refreshes.clear();
+        TeleportService.refreshTracking(
+                new TeleportService.Attempt<>(TeleportService.Outcome.FAILED, moved), NODE_TREE,
+                node -> refreshes.add("player"), node -> refreshes.add("entity"));
+        TeleportService.refreshTracking(
+                new TeleportService.Attempt<>(TeleportService.Outcome.PARTIAL, moved), NODE_TREE,
+                node -> refreshes.add("player"), node -> refreshes.add("entity"));
+        check(refreshes.isEmpty(), "failed and partial teleports never refresh entity tracking");
     }
 
     private static void reconciledPlayerNotificationsExcludeTheCommandPlayer() {
