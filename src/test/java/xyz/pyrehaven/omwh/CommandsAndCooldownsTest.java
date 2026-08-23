@@ -194,8 +194,9 @@ public final class CommandsAndCooldownsTest {
         OmwhConfig config = new OmwhConfig();
         var partial = new TeleportService.Result(TeleportService.Outcome.PARTIAL, java.util.List.of());
         var failed = new TeleportService.Result(TeleportService.Outcome.FAILED, java.util.List.of());
-        check(Commands.teleportFailureMessage(config, partial, "home").toLowerCase().contains("partially"),
-                "partial teleport gets a distinct warning");
+        check(Commands.teleportFailureMessage(config, partial, "home")
+                        .equals("§eMinecraft started moving your group, but OMWH could not verify every passenger. Check your group before moving again."),
+                "post-movement verification failure gets clear player guidance");
         check(Commands.continuesTeleportCompletion(partial),
                 "partial teleport continues through cooldown and passenger notifications");
         check(Commands.teleportFailureMessage(config, failed, "home")

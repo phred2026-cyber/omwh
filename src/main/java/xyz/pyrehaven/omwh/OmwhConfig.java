@@ -68,7 +68,7 @@ public final class OmwhConfig {
     public String internalErrorMessage = "§cInternal error executing /{command}. Check server log.";
     public String vehicleTooLargeMessage = "§cYour vehicle is too big. Dismount and try again.{forceGuidance}";
     public String forceGuidanceMessage = "\n§eUse /{command} force to teleport anyway.";
-    public String partialTeleportMessage = "§eTeleport may have partially completed, but OMWH could not verify every passenger attachment. Check your group before moving again.";
+    public String partialTeleportMessage = "§eMinecraft started moving your group, but OMWH could not verify every passenger. Check your group before moving again.";
     public String spawnDisabledMessage = "§cSpawn teleporting is disabled for this dimension.";
     public String spawnPendingMessage = "§eA /{command} safety search is already in progress.";
     public String spawnAnchorChangedMessage = "§cWorld spawn changed while OMWH was checking safety. Please try /{command} again.";

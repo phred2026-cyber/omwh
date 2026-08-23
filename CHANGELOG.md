@@ -18,7 +18,7 @@ OMWH 1.2.0 expands dimension support, gives players an optional safety override,
   | Modded dimensions | Disabled |
 
   When the current dimension's destination is disabled, `/spawn` may fall back to Overworld spawn only when both cross-dimension teleporting and Overworld spawn are enabled.
-- All command feedback can now be configured, including success, cooldown, safety, disabled-dimension, pending-search, passenger-limit, partial-teleport, and internal-error messages. Messages support `&` and `§` color codes plus the documented `{time}`, `{command}`, `{player}`, `{destination}`, and conditional `{forceGuidance}` placeholders.
+- All command feedback can now be configured, including success, cooldown, safety, disabled-dimension, pending-search, passenger-limit, group-verification, and internal-error messages. Messages support `&` and `§` color codes plus the documented `{time}`, `{command}`, `{player}`, `{destination}`, and conditional `{forceGuidance}` placeholders.
 
 ### Changed
 
@@ -38,7 +38,7 @@ OMWH 1.2.0 expands dimension support, gives players an optional safety override,
 - Hazard checks now match exact blocks. Blocks such as fire coral, or modded blocks whose names merely contain `fire`, `lava`, or `magma`, are no longer treated as hazards by name alone.
 - Self-inflicted damage now uses the normal damage cooldown instead of the PvP cooldown.
 - When event cooldowns overlap, the longer unexpired restriction wins. A shorter damage or join restriction can no longer replace a longer PvP restriction.
-- If movement begins but OMWH cannot verify the complete passenger group afterward, the player receives a partial-teleport warning and the regular cooldown starts. A refusal before movement still starts no regular cooldown.
+- If Minecraft starts moving a group but OMWH cannot verify every passenger afterward, players are told to check the group and the regular cooldown starts. A refusal before movement still starts no regular cooldown.
 
 ### Upgrade notes for server owners
 

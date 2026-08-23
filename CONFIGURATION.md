@@ -31,11 +31,11 @@ JSON uses `\n` for a newline inside a message. A literal backslash in JSON must 
 |---|---|---|---|
 | `homeCommand` | string | `"home"` | Literal command name for the home command. |
 | `spawnCommand` | string | `"spawn"` | Literal command name for the spawn command. |
-| `enableRegularCooldown` | boolean | `true` | Enables the cooldown recorded after a successful or possibly partial teleport. |
+| `enableRegularCooldown` | boolean | `true` | Enables the cooldown after `/home` or `/spawn` moves the player or passenger group. |
 | `regularCooldownSeconds` | integer | `30` | Regular cooldown duration. `0` disables this cooldown. |
-| `enablePvpCooldown` | boolean | `true` | Enables the cooldown after OMWH allows incoming player-versus-player damage. |
+| `enablePvpCooldown` | boolean | `true` | Enables the cooldown after a player takes damage from another player. |
 | `pvpCooldownSeconds` | integer | `45` | PvP cooldown duration. `0` disables this cooldown. |
-| `enableDamageCooldown` | boolean | `true` | Enables the cooldown after OMWH allows other incoming damage. |
+| `enableDamageCooldown` | boolean | `true` | Enables the cooldown after a player takes other damage, including self-damage. |
 | `damageCooldownSeconds` | integer | `10` | Other-damage cooldown duration. `0` disables this cooldown. |
 | `joinCooldownSeconds` | integer | `30` | Cooldown after joining. `0` disables it. |
 | `playTeleportSound` | boolean | `true` | Plays the teleport sound before an accepted teleport mutation. |
@@ -76,7 +76,7 @@ All message and destination-label fields are JSON strings. Both `&` and `§` Min
 | `internalErrorMessage` | `§cInternal error executing /{command}. Check server log.` | `{command}` |
 | `vehicleTooLargeMessage` | `§cYour vehicle is too big. Dismount and try again.{forceGuidance}` | `{command}`, `{forceGuidance}` |
 | `forceGuidanceMessage` | `\n§eUse /{command} force to teleport anyway.` | `{command}` |
-| `partialTeleportMessage` | `§eTeleport may have partially completed, but OMWH could not verify every passenger attachment. Check your group before moving again.` | `{command}` |
+| `partialTeleportMessage` | `§eMinecraft started moving your group, but OMWH could not verify every passenger. Check your group before moving again.` | `{command}` |
 | `spawnDisabledMessage` | `§cSpawn teleporting is disabled for this dimension.` | `{command}` |
 | `spawnPendingMessage` | `§eA /{command} safety search is already in progress.` | `{command}` |
 | `spawnAnchorChangedMessage` | `§cWorld spawn changed while OMWH was checking safety. Please try /{command} again.` | `{command}` |

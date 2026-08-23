@@ -36,14 +36,14 @@ Force skips only destination safety and vehicle-size checks. Cooldowns, missing 
 
 Server owners can configure:
 
-- A regular cooldown after a successful or possibly partial teleport
-- A PvP cooldown after OMWH allows incoming damage from another player
-- A damage cooldown after OMWH allows other incoming damage, including self-damage
+- A regular cooldown after `/home` or `/spawn` moves the player or group
+- A PvP cooldown after a player takes damage from another player
+- A damage cooldown after a player takes other damage, including self-damage
 - A join cooldown after connecting to the server
 
 When cooldowns overlap, the longer event restriction wins. Cooldown state is kept in memory and clears when a player disconnects, so reconnecting also clears a PvP cooldown and replaces it with the configured join cooldown.
 
-OMWH records damage cooldowns when its damage callback allows the incoming event. Another mod can still cancel that damage afterward.
+Self-damage uses the normal damage cooldown, not the PvP cooldown.
 
 ## Installation
 

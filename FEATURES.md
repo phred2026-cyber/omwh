@@ -67,23 +67,23 @@ safety and vehicle-size checks, but no other admission rule.
 - `TeleportService` captures entity identity and every parent-child attachment before mutation.
 - Same- and cross-dimension movement is performed by one recursive teleport of the root entity. OMWH does not manually dismount, move, and remount the tree.
 - Destination placement uses feet coordinates and preserves the captured attachment graph. Ordinary OMWH destinations clear carried root velocity after a successful move; the vanilla End-portal transition retains Minecraft's own relative movement handling. Successful moves then refresh Minecraft tracking for the reconciled tree so clients immediately receive moved vehicles and riders.
-- A null teleport result or teleport exception supplies no moved root and is logged as an internal command failure with no passenger notification or regular cooldown. Once Minecraft returns a moved root, a failed passenger-tree reconciliation is reported as a possible partial teleport; OMWH notifies trustworthy moved player passengers, records the regular cooldown to prevent free retries, and does not promise rollback.
+- A null teleport result or teleport exception supplies no moved root and is logged as an internal command failure with no passenger notification or regular cooldown. Once Minecraft returns a moved root, a failed passenger-tree check is reported as a post-movement verification failure; OMWH notifies trustworthy moved player passengers, records the regular cooldown to prevent free retries, and does not promise rollback.
 - Player passengers receive a message naming the command user and whether the group traveled to home or spawn.
 
 ## Cooldowns and events
 
 Cooldown state is keyed by player UUID and owned only by `Cooldowns`.
 
-- Regular cooldown: defaults to 30 seconds, is configurable and independently enabled, and begins after a successful teleport or a possible partial move past the mutation boundary.
-- PvP cooldown: defaults to 45 seconds, is configurable and independently enabled, and applies to both player attacker and player victim when incoming player-versus-player damage reaches OMWH's `ALLOW_DAMAGE` callback and OMWH allows it to continue.
-- Damage cooldown: defaults to 10 seconds, is configurable and independently enabled, and applies when incoming non-player or self-inflicted damage reaches OMWH's `ALLOW_DAMAGE` callback and OMWH allows it to continue.
+- Regular cooldown: defaults to 30 seconds, is configurable and independently enabled, and begins after `/home` or `/spawn` moves the player or passenger group. It also begins when movement starts but OMWH cannot verify every passenger afterward.
+- PvP cooldown: defaults to 45 seconds, is configurable and independently enabled, and applies to both players after one damages the other.
+- Damage cooldown: defaults to 10 seconds, is configurable and independently enabled, and applies after other damage, including self-damage.
 - Join cooldown: defaults to 30 seconds and applies when a player joins. A value of `0` disables it.
 - A disabled cooldown or a duration of `0` does not block teleporting.
 - When event cooldowns overlap, the longer unexpired event restriction wins; a shorter event cannot reduce an existing longer restriction.
 - Blocking priority and message selection are PvP, damage, join, then regular. Remaining time replaces `{time}` in the selected message.
 - Failed or denied command attempts do not begin the regular cooldown.
 - Cooldowns live only in process memory. UUID keys let active restrictions survive player-object replacement and respawn. State is removed when the player disconnects, and expired entries are removed lazily when queried.
-- PvP and other damage restrictions are recorded from Fabric's `ALLOW_DAMAGE` callback when OMWH allows the incoming damage event to continue. This callback runs before mitigation and does not observe the final event result: another listener may later cancel the damage, but the OMWH cooldown has already begun.
+- Fabric reports these damage events to OMWH before later listeners finish processing them. Another mod may still cancel the damage after OMWH starts the cooldown.
 
 ## Messages and effects
 
@@ -94,7 +94,7 @@ Cooldown state is keyed by player UUID and owned only by `Cooldowns`.
 - Teleport attempts may play the Enderman teleport sound at volume `0.5` and pitch `1.0`, controlled by `playTeleportSound`.
 - Teleport attempts may spawn 40 portal particles in a one-block ring around the command player, controlled by `spawnTeleportParticles`.
 - Effects run after destination acceptance but before entity mutation, so a mutation failure may still produce them. A denial before that point produces none.
-- A denial or pre-mutation failure must not send a success message or begin the regular cooldown. A possible partial move uses its warning and cooldown instead. Unexpected failures are logged with their cause and return command failure rather than being reported as success.
+- A denial or failure before movement must not send a success message or begin the regular cooldown. A post-movement verification failure uses its group warning and cooldown instead. Unexpected failures are logged with their cause and return command failure rather than being reported as success.
 
 ## Configuration
 
@@ -132,7 +132,7 @@ Cooldown state is keyed by player UUID and owned only by `Cooldowns`.
 | `internalErrorMessage` | `"§cInternal error executing /{command}. Check server log."` | Unexpected command or teleport failure text |
 | `vehicleTooLargeMessage` | `"§cYour vehicle is too big. Dismount and try again.{forceGuidance}"` | Oversized-vehicle text with dismount and conditional force guidance |
 | `forceGuidanceMessage` | `"\n§eUse /{command} force to teleport anyway."` | Conditional guidance inserted by `{forceGuidance}`; cannot contain `{forceGuidance}` itself |
-| `partialTeleportMessage` | `"§eTeleport may have partially completed, but OMWH could not verify every passenger attachment. Check your group before moving again."` | Post-mutation reconciliation warning |
+| `partialTeleportMessage` | `"§eMinecraft started moving your group, but OMWH could not verify every passenger. Check your group before moving again."` | Group warning when movement starts but passenger verification fails |
 | `spawnDisabledMessage` | `"§cSpawn teleporting is disabled for this dimension."` | Disabled dimension-route text |
 | `spawnPendingMessage` | `"§eA /{command} safety search is already in progress."` | Duplicate pending-search text |
 | `spawnAnchorChangedMessage` | `"§cWorld spawn changed while OMWH was checking safety. Please try /{command} again."` | Changed spawn-anchor text |
@@ -162,7 +162,7 @@ The configuration path is not strict whole-document schema validation: unknown k
   guidance.
 - Teleport invariant failures with no returned moved root use the command-specific internal-error
   message. They do not begin the regular cooldown or notify passengers. Reconciliation failures after
-  a non-null moved root use a distinct partial-teleport warning, notify trustworthy moved player
+  a non-null moved root use a distinct post-movement verification warning, notify trustworthy moved player
   passengers, and begin the regular cooldown.
 - `/spawn` reports an explicit failure when it cannot determine the current world or read the selected world's spawn. It never substitutes fabricated fallback coordinates.
-- A successful result means the recursive root teleport returned an entity, the captured attachments remained intact, success feedback was sent, and the regular cooldown was recorded. A possible partial result is not success, but it still records the cooldown because movement may already have happened.
+- A successful result means the recursive root teleport returned an entity, the captured attachments remained intact, success feedback was sent, and the regular cooldown was recorded. A post-movement verification failure is not success, but it still records the cooldown because Minecraft already started moving the group.
