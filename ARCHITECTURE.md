@@ -56,10 +56,12 @@ omwh/
 │   # Runs the canonical Gradle build and regression suites on pushes and pull requests.
 ├── ARCHITECTURE.md
 │   # This proposed file tree. Bug and verification checks compare code placement against it.
+├── CONFIGURATION.md
+│   # Complete server-owner reference for config fields, defaults, messages, and file handling.
 ├── FEATURES.md
 │   # Accepted behavior contract preserved while the implementation is rebuilt.
 ├── README.md
-│   # Installation, commands, full config reference, and gameplay behavior.
+│   # Installation, commands, concise configuration summary, and gameplay behavior.
 ├── CHANGELOG.md
 ├── LICENSE
 ├── .gitignore

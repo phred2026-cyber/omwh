@@ -122,57 +122,96 @@ public final class CommandsAndCooldownsTest {
 
     private static void commandFeedbackUsesSpecificMessagesColorsAndPassengerDestination() {
         OmwhConfig config = new OmwhConfig();
-        check(Commands.cooldownMessage(config, new Cooldowns.Blocking(Cooldowns.Type.PVP, 12))
+        check(Commands.renderMessage(config, config.pvpCooldownMessage,
+                        new Commands.MessageValues(null, null, null, 12, false))
                 .contains("12 seconds"), "cooldown placeholder");
         config.regularCooldownMessage = "&cWait {time}";
-        String rawCooldown = Commands.cooldownMessage(
-                config, new Cooldowns.Blocking(Cooldowns.Type.REGULAR, 3));
+        String rawCooldown = Commands.renderMessage(config, config.regularCooldownMessage,
+                new Commands.MessageValues(null, null, null, 3, false));
         check(rawCooldown.equals("&cWait 3"), "cooldown formatting is deferred to the send boundary");
         check(Commands.format(rawCooldown).equals("§cWait 3"), "send boundary applies ampersand colors once");
-        check(Commands.passengerMessage("Alex", true).contains("their home"), "home passenger message");
-        check(Commands.passengerMessage("Alex", false).endsWith("to spawn."), "spawn passenger message");
+        config.passengerNotificationMessage = "&e{player} took you to {destination}.";
+        check(Commands.renderMessage(config, config.passengerNotificationMessage,
+                        new Commands.MessageValues(null, "Alex", config.homePassengerDestination, null, false))
+                        .equals("&eAlex took you to their home."),
+                "home passenger notification is configurable");
+        check(Commands.renderMessage(config, config.passengerNotificationMessage,
+                        new Commands.MessageValues(null, "Alex", config.spawnPassengerDestination, null, false))
+                        .equals("&eAlex took you to spawn."),
+                "spawn passenger notification is configurable");
         config.homeCommand = "return";
         config.spawnCommand = "hub";
-        config.unsafeHomeMessage = "§cBlocked home.";
-        config.unsafeSpawnMessage = "§cBlocked spawn.";
-        check(Commands.unsafeMessage(config.unsafeHomeMessage, config.homeCommand, true)
+        config.unsafeHomeMessage = "§cBlocked home.{forceGuidance}";
+        config.unsafeSpawnMessage = "§cBlocked spawn.{forceGuidance}";
+        config.forceGuidanceMessage = "\n§eUse /{command} force to teleport anyway.";
+        check(Commands.renderMessage(config, config.unsafeHomeMessage,
+                        new Commands.MessageValues(config.homeCommand, null, null, null, true))
                         .equals("§cBlocked home.\n§eUse /return force to teleport anyway."),
                 "unsafe home advertises the configured force command");
-        check(Commands.unsafeMessage(config.unsafeSpawnMessage, config.spawnCommand, true)
+        check(Commands.renderMessage(config, config.unsafeSpawnMessage,
+                        new Commands.MessageValues(config.spawnCommand, null, null, null, true))
                         .equals("§cBlocked spawn.\n§eUse /hub force to teleport anyway."),
                 "unsafe spawn advertises the configured force command");
-        check(Commands.unsafeMessage(config.unsafeHomeMessage, config.homeCommand, false)
-                        .equals(config.unsafeHomeMessage),
+        check(Commands.renderMessage(config, config.unsafeHomeMessage,
+                        new Commands.MessageValues(config.homeCommand, null, null, null, false))
+                        .equals("§cBlocked home."),
                 "unsafe home does not advertise a disabled force command");
-        check(Commands.unsafeMessage(config.unsafeSpawnMessage, config.spawnCommand, false)
-                        .equals(config.unsafeSpawnMessage),
+        check(Commands.renderMessage(config, config.unsafeSpawnMessage,
+                        new Commands.MessageValues(config.spawnCommand, null, null, null, false))
+                        .equals("§cBlocked spawn."),
                 "unsafe spawn does not advertise a disabled force command");
-        check(Commands.PASSENGER_TREE_TOO_LARGE.toLowerCase().contains("passenger")
-                        && Commands.PASSENGER_TREE_TOO_LARGE.toLowerCase().contains("large"),
-                "passenger cap denial has deliberate player-facing feedback");
+        check(Commands.renderMessageWithForceGuidance(config, "§cLegacy unsafe text.", config.homeCommand)
+                        .equals("§cLegacy unsafe text.\n§eUse /return force to teleport anyway."),
+                "existing unsafe messages without the placeholder retain force guidance");
+        check(Commands.renderMessage(config, config.vehicleTooLargeMessage,
+                        new Commands.MessageValues(config.homeCommand, null, null, null, true))
+                        .contains("/return force"),
+                "home vehicle-too-large feedback offers its configured force command");
+        check(Commands.renderMessage(config, config.vehicleTooLargeMessage,
+                        new Commands.MessageValues(config.spawnCommand, null, null, null, true))
+                        .contains("/hub force"),
+                "spawn vehicle-too-large feedback offers its configured force command");
+        check(!Commands.renderMessage(config, config.vehicleTooLargeMessage,
+                        new Commands.MessageValues(config.homeCommand, null, null, null, false))
+                        .contains("force"),
+                "vehicle-too-large feedback does not advertise disabled force");
+        config.enableForceOverride = false;
+        check(Commands.renderMessageWithForceGuidance(config, "§cLegacy unsafe text.", config.homeCommand)
+                        .equals("§cLegacy unsafe text."),
+                "existing unsafe messages do not advertise disabled force");
+        config.enableForceOverride = true;
+        check(config.passengerTreeTooLargeMessage.toLowerCase().contains("passenger")
+                        && config.passengerTreeTooLargeMessage.toLowerCase().contains("large"),
+                "passenger cap denial has deliberate configurable feedback");
+        config.homeSuccessMessage = "&a/{command} complete.";
+        check(Commands.renderMessage(config, config.homeSuccessMessage,
+                        new Commands.MessageValues(config.homeCommand, null, null, null, false))
+                        .equals("&a/return complete."),
+                "success feedback is rendered from configuration");
     }
 
     private static void teleportOutcomesUseInternalFailureAndPartialPolicies() {
+        OmwhConfig config = new OmwhConfig();
         var partial = new TeleportService.Result(TeleportService.Outcome.PARTIAL, java.util.List.of());
         var failed = new TeleportService.Result(TeleportService.Outcome.FAILED, java.util.List.of());
-        check(Commands.teleportFailureMessage(partial, "home").toLowerCase().contains("partially"),
+        check(Commands.teleportFailureMessage(config, partial, "home").toLowerCase().contains("partially"),
                 "partial teleport gets a distinct warning");
         check(Commands.continuesTeleportCompletion(partial),
                 "partial teleport continues through cooldown and passenger notifications");
-        check(Commands.teleportFailureMessage(failed, "home")
+        check(Commands.teleportFailureMessage(config, failed, "home")
                         .equals("§cInternal error executing /home. Check server log."),
                 "home teleport invariant failure gets command-specific internal error text");
-        check(Commands.teleportFailureMessage(failed, "spawn")
+        check(Commands.teleportFailureMessage(config, failed, "spawn")
                         .equals("§cInternal error executing /spawn. Check server log."),
                 "spawn teleport invariant failure gets command-specific internal error text");
-        check(!Commands.teleportFailureMessage(failed, "home").toLowerCase().contains("safe"),
+        check(!Commands.teleportFailureMessage(config, failed, "home").toLowerCase().contains("safe"),
                 "teleport invariant failure never exposes destination-safety wording");
         check(!Commands.continuesTeleportCompletion(failed),
                 "failed teleport stops before cooldown and passenger notifications");
     }
 
     private static void disabledSpawnFeedbackDoesNotClaimAWorldIsMissing() {
-        String message = Commands.SPAWN_DISABLED.toLowerCase();
+        String message = new OmwhConfig().spawnDisabledMessage.toLowerCase();
         check(message.contains("disabled"), "disabled spawn has an explicit policy message");
         check(!message.contains("missing") && !message.contains("cannot determine"),
                 "disabled spawn is not reported as a missing world");
@@ -188,8 +227,8 @@ public final class CommandsAndCooldownsTest {
         };
         check(pending.add("player", work), "first /spawn search becomes pending");
         check(!pending.add("player", work), "duplicate /spawn cannot replace or double a pending search");
-        check(Commands.SPAWN_PENDING.toLowerCase().contains("already")
-                        && Commands.SPAWN_PENDING.toLowerCase().contains("progress"),
+        check(new OmwhConfig().spawnPendingMessage.toLowerCase().contains("already")
+                        && new OmwhConfig().spawnPendingMessage.toLowerCase().contains("progress"),
                 "duplicate pending invocation has explicit player feedback");
         pending.tick(1, 1, completions::add);
         pending.tick(1, 1, completions::add);
@@ -406,10 +445,10 @@ public final class CommandsAndCooldownsTest {
                 () -> TeleportService.LifecycleStatus.TOO_LARGE,
                 value -> true, value -> true, value -> events.add("complete"),
                 status -> events.add(status == TeleportService.LifecycleStatus.TOO_LARGE
-                        ? Commands.PASSENGER_TREE_TOO_LARGE : "stale"))),
+                        ? config.passengerTreeTooLargeMessage : "stale"))),
                 "oversized lifecycle coordinator enqueued");
         commands.tick();
-        check(events.equals(List.of(Commands.PASSENGER_TREE_TOO_LARGE)),
+        check(events.equals(List.of(config.passengerTreeTooLargeMessage)),
                 "oversized pending lifecycle retires with explicit passenger-cap feedback");
     }
 

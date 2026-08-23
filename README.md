@@ -64,7 +64,7 @@ Players do not need to install OMWH on their clients. OMWH also works in singlep
 
 ## Configuration
 
-Edit `config/omwh.json` after the first launch.
+Edit `config/omwh.json` after the first launch, then restart the server. OMWH does not reload configuration while the server is running. See [CONFIGURATION.md](CONFIGURATION.md) for the complete field, message, placeholder, color-code, and validation reference.
 
 | Field | Default | Purpose |
 |---|---:|---|
@@ -82,12 +82,12 @@ Edit `config/omwh.json` after the first launch.
 | `enableForceOverride` | `true` | Enable `/home force` and `/spawn force` for players who can use the parent commands |
 | `enableCrossDimensionTeleport` | `true` | Allow valid cross-dimension homes and eligible spawn travel |
 | `enableOverworldSpawn` | `true` | Allow the Overworld spawn destination |
-| `enableNetherSpawn` | `true` | Allow the Nether spawn destination |
-| `enableEndSpawn` | `true` | Allow the End spawn destination |
-| `enableModdedDimensionSpawn` | `true` | Allow `/spawn` to stay in the current modded dimension |
-| Message fields | See config | Messages shown to players; supports Minecraft color codes and `{time}` |
+| `enableNetherSpawn` | `false` | Allow the Nether spawn destination |
+| `enableEndSpawn` | `false` | Allow the End spawn destination |
+| `enableModdedDimensionSpawn` | `false` | Allow `/spawn` to stay in the current modded dimension |
+| Message fields | See [CONFIGURATION.md](CONFIGURATION.md) | Every player-facing command outcome, including success, safety, passenger, partial, and internal-error feedback |
 
-Set a cooldown duration to `0` to disable it. Existing configuration files can omit newer fields; OMWH uses the default value for anything missing. Unknown fields are ignored. Known settings must use the documented JSON type, and invalid command names, negative cooldowns, malformed JSON, or other invalid known values stop startup with a clear configuration error instead of being silently ignored.
+Set a cooldown duration to `0` to disable it. Existing configuration files can omit newer fields; OMWH uses the default value for anything missing. This means omitted Nether, End, and modded-dimension spawn settings are disabled. Unknown fields are ignored. Known settings must use the documented JSON type, and invalid command names, negative cooldowns, malformed JSON, or other invalid known values stop startup with a clear configuration error instead of being silently ignored.
 
 ## Links
 

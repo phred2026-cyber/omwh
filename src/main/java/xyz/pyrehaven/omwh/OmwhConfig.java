@@ -22,7 +22,11 @@ public final class OmwhConfig {
     private static final String[] STRING_FIELDS = {
             "homeCommand", "spawnCommand", "homeSuccessMessage", "spawnSuccessMessage",
             "noHomepointMessage", "crossDimensionMessage", "unsafeHomeMessage", "unsafeSpawnMessage",
-            "pvpCooldownMessage", "damageCooldownMessage", "joinCooldownMessage", "regularCooldownMessage"
+            "pvpCooldownMessage", "damageCooldownMessage", "joinCooldownMessage", "regularCooldownMessage",
+            "internalErrorMessage", "vehicleTooLargeMessage", "forceGuidanceMessage", "partialTeleportMessage",
+            "spawnDisabledMessage", "spawnPendingMessage", "spawnAnchorChangedMessage", "busyMessage",
+            "passengerTreeTooLargeMessage", "currentWorldUnavailableMessage", "worldSpawnUnavailableMessage",
+            "passengerNotificationMessage", "homePassengerDestination", "spawnPassengerDestination"
     };
     private static final String[] BOOLEAN_FIELDS = {
             "enableRegularCooldown", "enablePvpCooldown", "enableDamageCooldown",
@@ -48,19 +52,33 @@ public final class OmwhConfig {
     public boolean enableForceOverride = true;
     public boolean enableCrossDimensionTeleport = true;
     public boolean enableOverworldSpawn = true;
-    public boolean enableNetherSpawn = true;
-    public boolean enableEndSpawn = true;
-    public boolean enableModdedDimensionSpawn = true;
+    public boolean enableNetherSpawn = false;
+    public boolean enableEndSpawn = false;
+    public boolean enableModdedDimensionSpawn = false;
     public String homeSuccessMessage = "§aTeleported to your home!";
     public String spawnSuccessMessage = "§aTeleported to world spawn!";
     public String noHomepointMessage = "§cYou don't have a spawn point set!";
     public String crossDimensionMessage = "§cYou are not powerful enough to bend space between dimensions. Use a portal first, then try again!";
-    public String unsafeHomeMessage = "§cIt is not safe to teleport here.";
-    public String unsafeSpawnMessage = "§cIt is not safe to teleport here.";
+    public String unsafeHomeMessage = "§cIt is not safe to teleport here.{forceGuidance}";
+    public String unsafeSpawnMessage = "§cIt is not safe to teleport here.{forceGuidance}";
     public String pvpCooldownMessage = "§cYou were recently in combat! Please wait {time} seconds before teleporting.";
     public String damageCooldownMessage = "§cYou recently took damage! Please wait {time} seconds before teleporting.";
     public String joinCooldownMessage = "§cYou must wait {time} seconds after joining before teleporting!";
     public String regularCooldownMessage = "§cYou recently teleported! Please wait {time} seconds before trying again.";
+    public String internalErrorMessage = "§cInternal error executing /{command}. Check server log.";
+    public String vehicleTooLargeMessage = "§cYour vehicle is too big. Dismount and try again.{forceGuidance}";
+    public String forceGuidanceMessage = "\n§eUse /{command} force to teleport anyway.";
+    public String partialTeleportMessage = "§eTeleport may have partially completed, but OMWH could not verify every passenger attachment. Check your group before moving again.";
+    public String spawnDisabledMessage = "§cSpawn teleporting is disabled for this dimension.";
+    public String spawnPendingMessage = "§eA /{command} safety search is already in progress.";
+    public String spawnAnchorChangedMessage = "§cWorld spawn changed while OMWH was checking safety. Please try /{command} again.";
+    public String busyMessage = "§cOMWH reached its server work limit for this tick. Please try /{command} again.";
+    public String passengerTreeTooLargeMessage = "§cYour passenger group is too large for OMWH to teleport safely.";
+    public String currentWorldUnavailableMessage = "§cCannot determine your current world.";
+    public String worldSpawnUnavailableMessage = "§cCannot determine world spawn.";
+    public String passengerNotificationMessage = "§e{player} teleported you with their vehicle to {destination}.";
+    public String homePassengerDestination = "their home";
+    public String spawnPassengerDestination = "spawn";
 
     public static OmwhConfig load() {
         return load(FabricLoader.getInstance().getConfigDir().resolve("omwh.json"));
@@ -163,6 +181,23 @@ public final class OmwhConfig {
         requireMessage(damageCooldownMessage, "damageCooldownMessage");
         requireMessage(joinCooldownMessage, "joinCooldownMessage");
         requireMessage(regularCooldownMessage, "regularCooldownMessage");
+        requireMessage(internalErrorMessage, "internalErrorMessage");
+        requireMessage(vehicleTooLargeMessage, "vehicleTooLargeMessage");
+        requireMessage(forceGuidanceMessage, "forceGuidanceMessage");
+        requireMessage(partialTeleportMessage, "partialTeleportMessage");
+        requireMessage(spawnDisabledMessage, "spawnDisabledMessage");
+        requireMessage(spawnPendingMessage, "spawnPendingMessage");
+        requireMessage(spawnAnchorChangedMessage, "spawnAnchorChangedMessage");
+        requireMessage(busyMessage, "busyMessage");
+        requireMessage(passengerTreeTooLargeMessage, "passengerTreeTooLargeMessage");
+        requireMessage(currentWorldUnavailableMessage, "currentWorldUnavailableMessage");
+        requireMessage(worldSpawnUnavailableMessage, "worldSpawnUnavailableMessage");
+        requireMessage(passengerNotificationMessage, "passengerNotificationMessage");
+        requireMessage(homePassengerDestination, "homePassengerDestination");
+        requireMessage(spawnPassengerDestination, "spawnPassengerDestination");
+        if (forceGuidanceMessage.contains("{forceGuidance}")) {
+            throw new IllegalArgumentException("forceGuidanceMessage must not contain {forceGuidance}");
+        }
     }
 
     private static void requireLiteral(String value, String field) {

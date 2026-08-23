@@ -25,14 +25,6 @@ import java.util.function.Supplier;
 
 public final class Commands {
     private static final Logger LOGGER = LoggerFactory.getLogger("omwh");
-    private static final String INTERNAL_ERROR = "§cInternal error executing /%s. Check server log.";
-    private static final String VEHICLE_TOO_LARGE = "§cYour vehicle is too big. Please dismount and try again.";
-    private static final String PARTIAL_TELEPORT = "§eTeleport may have partially completed, but OMWH could not verify every passenger attachment. Check your group before moving again.";
-    static final String SPAWN_DISABLED = "§cSpawn teleporting is disabled for this dimension.";
-    static final String SPAWN_PENDING = "§eA /spawn safety search is already in progress.";
-    static final String SPAWN_ANCHOR_CHANGED = "§cWorld spawn changed while OMWH was checking safety. Please try /spawn again.";
-    static final String SPAWN_BUSY = "§cOMWH reached its server work limit for this tick. Please try /spawn again.";
-    static final String PASSENGER_TREE_TOO_LARGE = "§cYour passenger group is too large for OMWH to teleport safely.";
     static final int SEARCH_CANDIDATES_PER_TICK = 4_096;
     static final int MAX_EFFECT_DISPATCHES = 1 + 40;
     static final int MAX_IMMEDIATE_ROUTE_WORK = Math.max(
@@ -143,6 +135,8 @@ public final class Commands {
         }
     }
     record PendingTick(int candidatesUsed, int worldWorkUsed, int itemsCompleted) { }
+    record MessageValues(String command, String player, String destination, Integer time,
+                         boolean forceEnabled) { }
     enum PendingSpawnAction { CONTINUE, REFUSE, CANCEL_AND_CONTINUE }
 
     static final class PendingSearches<K, V> {
@@ -247,28 +241,44 @@ public final class Commands {
     }
 
     static String cooldownMessage(OmwhConfig config, Cooldowns.Blocking blocking) {
-        String message = switch (blocking.type()) {
+        String template = switch (blocking.type()) {
             case PVP -> config.pvpCooldownMessage;
             case DAMAGE -> config.damageCooldownMessage;
             case JOIN -> config.joinCooldownMessage;
             case REGULAR -> config.regularCooldownMessage;
             case NONE -> throw new IllegalArgumentException("NONE has no cooldown message");
         };
-        return message.replace("{time}", Integer.toString(blocking.remainingSeconds()));
+        return renderMessage(config, template,
+                new MessageValues(null, null, null, blocking.remainingSeconds(), false));
     }
 
-    static String passengerMessage(String playerName, boolean home) {
-        return "§e" + playerName + " teleported you with their vehicle to "
-                + (home ? "their home" : "spawn") + ".";
+    static String renderMessage(OmwhConfig config, String template, MessageValues values) {
+        String message = template;
+        if (values.command() != null) message = message.replace("{command}", values.command());
+        if (values.player() != null) message = message.replace("{player}", values.player());
+        if (values.destination() != null) message = message.replace("{destination}", values.destination());
+        if (values.time() != null) message = message.replace("{time}", values.time().toString());
+        String forceGuidance = values.forceEnabled()
+                ? renderMessage(config, config.forceGuidanceMessage,
+                new MessageValues(values.command(), values.player(), values.destination(), values.time(), false))
+                : "";
+        return message.replace("{forceGuidance}", forceGuidance);
     }
 
-    static String unsafeMessage(String configuredMessage, String commandName, boolean forceEnabled) {
-        if (!forceEnabled) return configuredMessage;
-        return configuredMessage + "\n§eUse /" + commandName + " force to teleport anyway.";
+    static String teleportFailureMessage(OmwhConfig config, TeleportService.Result result,
+                                         String commandName) {
+        String template = result.partial() ? config.partialTeleportMessage : config.internalErrorMessage;
+        return renderMessage(config, template,
+                new MessageValues(commandName, null, null, null, false));
     }
 
-    static String teleportFailureMessage(TeleportService.Result result, String commandName) {
-        return result.partial() ? PARTIAL_TELEPORT : INTERNAL_ERROR.formatted(commandName);
+    static String renderMessageWithForceGuidance(OmwhConfig config, String template, String command) {
+        boolean placesGuidance = template.contains("{forceGuidance}");
+        String rendered = renderMessage(config, template,
+                new MessageValues(command, null, null, null, config.enableForceOverride));
+        if (!config.enableForceOverride || placesGuidance) return rendered;
+        return rendered + renderMessage(config, config.forceGuidanceMessage,
+                new MessageValues(command, null, null, null, false));
     }
 
     static boolean continuesTeleportCompletion(TeleportService.Result result) {
@@ -281,25 +291,26 @@ public final class Commands {
         try {
             if (!admit(player)) return 0;
             if (!serverWork.claim(TeleportService.LIFECYCLE_CAPTURE_WORK + MAX_IMMEDIATE_ROUTE_WORK)) {
-                send(player, SPAWN_BUSY);
+                send(player, commandMessage(config.busyMessage, config.homeCommand));
                 return 0;
             }
             TeleportService.captureLifecycle(player);
             HomeDestination.Result destination = HomeDestination.find(
                     player, force, config.enableCrossDimensionTeleport);
             switch (destination.outcome()) {
-                case NO_HOME -> send(player, config.noHomepointMessage);
-                case CROSS_DIMENSION -> send(player, config.crossDimensionMessage);
-                case VEHICLE_TOO_LARGE -> send(player, VEHICLE_TOO_LARGE);
-                case UNSAFE -> send(player, unsafeMessage(
-                        config.unsafeHomeMessage, config.homeCommand, config.enableForceOverride));
+                case NO_HOME -> send(player, commandMessage(config.noHomepointMessage, config.homeCommand));
+                case CROSS_DIMENSION -> send(player, commandMessage(config.crossDimensionMessage, config.homeCommand));
+                case VEHICLE_TOO_LARGE -> send(player,
+                        commandMessageWithForceGuidance(config.vehicleTooLargeMessage, config.homeCommand));
+                case UNSAFE -> send(player,
+                        commandMessageWithForceGuidance(config.unsafeHomeMessage, config.homeCommand));
                 case ACCEPT -> { return teleport(player, destination.destination(), true, false); }
             }
         } catch (TeleportService.PassengerTreeTooLarge tooLarge) {
-            sendSafely(player, PASSENGER_TREE_TOO_LARGE);
+            sendSafely(player, commandMessage(config.passengerTreeTooLargeMessage, config.homeCommand));
         } catch (RuntimeException failure) {
             LOGGER.error("Unexpected /home failure for {}", player.getGameProfile().name(), failure);
-            sendSafely(player, INTERNAL_ERROR.formatted(config.homeCommand));
+            sendSafely(player, commandMessage(config.internalErrorMessage, config.homeCommand));
         }
         return 0;
     }
@@ -308,21 +319,21 @@ public final class Commands {
         if (player == null) return 0;
         PendingSpawnAction pendingAction = pendingSpawnAction(pendingSpawns.contains(player.getUUID()), force);
         if (pendingAction == PendingSpawnAction.REFUSE) {
-            send(player, SPAWN_PENDING);
+            send(player, commandMessage(config.spawnPendingMessage, config.spawnCommand));
             return 0;
         }
         if (pendingAction == PendingSpawnAction.CANCEL_AND_CONTINUE) pendingSpawns.remove(player.getUUID());
         try {
             if (!admit(player)) return 0;
             if (!(player.level() instanceof ServerLevel level)) {
-                send(player, "§cCannot determine your current world.");
+                send(player, commandMessage(config.currentWorldUnavailableMessage, config.spawnCommand));
                 return 0;
             }
             SpawnDestination.Target target = SpawnDestination.route(SpawnDestination.dimension(level),
                     config.enableCrossDimensionTeleport, config.enableOverworldSpawn,
                     config.enableNetherSpawn, config.enableEndSpawn, config.enableModdedDimensionSpawn);
             if (target == SpawnDestination.Target.DISABLED) {
-                send(player, SPAWN_DISABLED);
+                send(player, commandMessage(config.spawnDisabledMessage, config.spawnCommand));
                 return 0;
             }
             ServerLevel selectedLevel = target == SpawnDestination.Target.OVERWORLD
@@ -330,12 +341,12 @@ public final class Commands {
             boolean immediate = force || selectedLevel.dimension().equals(net.minecraft.world.level.Level.END);
             if (immediate) {
                 if (!serverWork.claim(TeleportService.LIFECYCLE_CAPTURE_WORK + MAX_IMMEDIATE_ROUTE_WORK)) {
-                    send(player, SPAWN_BUSY);
+                    send(player, commandMessage(config.busyMessage, config.spawnCommand));
                     return 0;
                 }
                 TeleportService.captureLifecycle(player);
             } else if (!serverWork.claim(SpawnDestination.ADMISSION_SNAPSHOT_PROBE_WORK)) {
-                send(player, SPAWN_BUSY);
+                send(player, commandMessage(config.busyMessage, config.spawnCommand));
                 return 0;
             }
             SpawnDestination.Plan plan = SpawnDestination.plan(player, selectedLevel, force);
@@ -343,7 +354,7 @@ public final class Commands {
 
             SpawnDestination.Pending search = plan.pending();
             if (!serverWork.claim(TeleportService.LIFECYCLE_CAPTURE_WORK)) {
-                send(player, SPAWN_BUSY);
+                send(player, commandMessage(config.busyMessage, config.spawnCommand));
                 return 0;
             }
             TeleportService.LifecycleFence<Entity> lifecycle = TeleportService.captureLifecycle(player);
@@ -360,13 +371,15 @@ public final class Commands {
                         if (result.outcome() != SpawnDestination.Outcome.ACCEPT) return true;
                         boolean current = SpawnDestination.matchesSearchAnchor(result.searchAnchor(),
                                 SpawnDestination.currentAnchor(result.destination().level()));
-                        if (!current) sendSafely(player, SPAWN_ANCHOR_CHANGED);
+                        if (!current) sendSafely(player,
+                                commandMessage(config.spawnAnchorChangedMessage, config.spawnCommand));
                         return current;
                     },
                     result -> completeSpawn(player, result),
                     status -> {
                         if (status == TeleportService.LifecycleStatus.TOO_LARGE) {
-                            sendSafely(player, PASSENGER_TREE_TOO_LARGE);
+                            sendSafely(player,
+                                    commandMessage(config.passengerTreeTooLargeMessage, config.spawnCommand));
                         }
                     });
             pendingSpawns.add(player.getUUID(), (candidateBudget, worldWorkBudget) -> {
@@ -374,16 +387,16 @@ public final class Commands {
                     return coordinated.step(candidateBudget, worldWorkBudget);
                 } catch (RuntimeException failure) {
                     LOGGER.error("Unexpected pending /spawn failure for {}", player.getGameProfile().name(), failure);
-                    sendSafely(player, INTERNAL_ERROR.formatted(config.spawnCommand));
+                    sendSafely(player, commandMessage(config.internalErrorMessage, config.spawnCommand));
                     return failedPendingStep(null, candidateBudget, worldWorkBudget);
                 }
             });
             return 1;
         } catch (TeleportService.PassengerTreeTooLarge tooLarge) {
-            sendSafely(player, PASSENGER_TREE_TOO_LARGE);
+            sendSafely(player, commandMessage(config.passengerTreeTooLargeMessage, config.spawnCommand));
         } catch (RuntimeException failure) {
             LOGGER.error("Unexpected /spawn failure for {}", player.getGameProfile().name(), failure);
-            sendSafely(player, INTERNAL_ERROR.formatted(config.spawnCommand));
+            sendSafely(player, commandMessage(config.internalErrorMessage, config.spawnCommand));
         }
         return 0;
     }
@@ -420,11 +433,16 @@ public final class Commands {
 
     private int completeSpawn(ServerPlayer player, SpawnDestination.Result destination) {
         return switch (destination.outcome()) {
-            case NO_WORLD_SPAWN -> { send(player, "§cCannot determine world spawn."); yield 0; }
-            case VEHICLE_TOO_LARGE -> { send(player, VEHICLE_TOO_LARGE); yield 0; }
+            case NO_WORLD_SPAWN -> {
+                send(player, commandMessage(config.worldSpawnUnavailableMessage, config.spawnCommand));
+                yield 0;
+            }
+            case VEHICLE_TOO_LARGE -> {
+                send(player, commandMessageWithForceGuidance(config.vehicleTooLargeMessage, config.spawnCommand));
+                yield 0;
+            }
             case UNSAFE -> {
-                send(player, unsafeMessage(config.unsafeSpawnMessage,
-                        config.spawnCommand, config.enableForceOverride));
+                send(player, commandMessageWithForceGuidance(config.unsafeSpawnMessage, config.spawnCommand));
                 yield 0;
             }
             case ACCEPT -> {
@@ -439,6 +457,15 @@ public final class Commands {
                 message -> send(player, message));
     }
 
+    private String commandMessage(String template, String command) {
+        return renderMessage(config, template,
+                new MessageValues(command, null, null, null, false));
+    }
+
+    private String commandMessageWithForceGuidance(String template, String command) {
+        return renderMessageWithForceGuidance(config, template, command);
+    }
+
     private int teleport(ServerPlayer player, DestinationSafety.Prepared destination, boolean home,
                          boolean incrementalDestinationReady) {
         if (shouldLoadDestinationChunks(incrementalDestinationReady)) {
@@ -447,24 +474,32 @@ public final class Commands {
         playEffects(player);
         TeleportService.Result result = TeleportService.teleport(player, destination);
         if (!continuesTeleportCompletion(result)) {
-            sendSafely(player, teleportFailureMessage(result, home ? config.homeCommand : config.spawnCommand));
+            sendSafely(player, teleportFailureMessage(
+                    config, result, home ? config.homeCommand : config.spawnCommand));
             return 0;
         }
 
         try {
             cooldowns.recordRegular(player.getUUID());
-            String passengerMessage = passengerMessage(player.getName().getString(), home);
+            String command = home ? config.homeCommand : config.spawnCommand;
+            String destinationName = home
+                    ? config.homePassengerDestination
+                    : config.spawnPassengerDestination;
+            String passengerMessage = renderMessage(config, config.passengerNotificationMessage,
+                    new MessageValues(command, player.getName().getString(), destinationName, null, false));
             for (ServerPlayer passenger : result.passengerPlayers()) sendSafely(passenger, passengerMessage);
             if (result.partial()) {
-                sendSafely(player, PARTIAL_TELEPORT);
+                sendSafely(player, commandMessage(config.partialTeleportMessage, command));
                 return 0;
             }
-            sendSafely(player, home ? config.homeSuccessMessage : config.spawnSuccessMessage);
+            String successTemplate = home ? config.homeSuccessMessage : config.spawnSuccessMessage;
+            sendSafely(player, commandMessage(successTemplate, command));
             return 1;
         } catch (RuntimeException failure) {
             LOGGER.error("OMWH completion failed after teleport mutation", failure);
             cooldowns.recordRegular(player.getUUID());
-            sendSafely(player, PARTIAL_TELEPORT);
+            sendSafely(player, commandMessage(config.partialTeleportMessage,
+                    home ? config.homeCommand : config.spawnCommand));
             return 0;
         }
     }

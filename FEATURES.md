@@ -89,9 +89,9 @@ Cooldown state is keyed by player UUID and owned only by `Cooldowns`.
 ## Messages and effects
 
 - Command feedback is sent as server system messages.
-- Configured messages support section-sign color codes and ampersand color codes. Cooldown messages support the `{time}` placeholder.
-- Each command has a configurable success message. Missing home, cross-dimension home, unsafe home, unsafe spawn, PvP cooldown, damage cooldown, join cooldown, and regular cooldown each have a distinct configurable message.
-- Vehicle-too-large, passenger notification, and unexpected internal-error messages remain explicit command outcomes even though they are not currently configurable fields.
+- Configured messages support section-sign and ampersand color codes. `Commands` owns placeholder rendering, and the send boundary translates ampersands once. Supported values are `{time}`, `{command}`, `{player}`, `{destination}`, and conditional `{forceGuidance}` where documented in `CONFIGURATION.md`.
+- Every player-facing command outcome comes from `OmwhConfig`, including success, destination denials, cooldowns, busy or pending searches, vehicle and passenger limits, passenger notifications, partial outcomes, and internal errors.
+- Passenger notifications render the command user and the configured home or spawn destination label. Success and failure messages are rendered through the same owner as all other command feedback.
 - Teleport attempts may play the Enderman teleport sound at volume `0.5` and pitch `1.0`, controlled by `playTeleportSound`.
 - Teleport attempts may spawn 40 portal particles in a one-block ring around the command player, controlled by `spawnTeleportParticles`.
 - Effects run after destination acceptance but before entity mutation, so a mutation failure may still produce them. A denial before that point produces none.
@@ -117,19 +117,33 @@ Cooldown state is keyed by player UUID and owned only by `Cooldowns`.
 | `enableForceOverride` | `true` | Registers the player-usable literal `force` child for both commands |
 | `enableCrossDimensionTeleport` | `true` | Allows valid cross-dimension homes and eligible Nether/End/modded-to-Overworld spawn routes |
 | `enableOverworldSpawn` | `true` | Allows Overworld spawn as the current or selected destination |
-| `enableNetherSpawn` | `true` | Allows Nether spawn while the player is in the Nether |
-| `enableEndSpawn` | `true` | Allows the End arrival destination while the player is in the End |
-| `enableModdedDimensionSpawn` | `true` | Allows `/spawn` to stay in the current modded dimension |
+| `enableNetherSpawn` | `false` | Allows Nether spawn while the player is in the Nether |
+| `enableEndSpawn` | `false` | Allows the End arrival destination while the player is in the End |
+| `enableModdedDimensionSpawn` | `false` | Allows `/spawn` to stay in the current modded dimension |
 | `homeSuccessMessage` | `"§aTeleported to your home!"` | `/home` success text |
 | `spawnSuccessMessage` | `"§aTeleported to world spawn!"` | `/spawn` success text |
 | `noHomepointMessage` | `"§cYou don't have a spawn point set!"` | Missing or invalid home text |
 | `crossDimensionMessage` | `"§cYou are not powerful enough to bend space between dimensions. Use a portal first, then try again!"` | Cross-dimension refusal text |
-| `unsafeHomeMessage` | `"§cIt is not safe to teleport here."` | Unsafe-home text |
-| `unsafeSpawnMessage` | `"§cIt is not safe to teleport here."` | Unsafe-spawn text |
+| `unsafeHomeMessage` | `"§cIt is not safe to teleport here.{forceGuidance}"` | Unsafe-home text with conditional force guidance |
+| `unsafeSpawnMessage` | `"§cIt is not safe to teleport here.{forceGuidance}"` | Unsafe-spawn text with conditional force guidance |
 | `pvpCooldownMessage` | `"§cYou were recently in combat! Please wait {time} seconds before teleporting."` | PvP block text |
 | `damageCooldownMessage` | `"§cYou recently took damage! Please wait {time} seconds before teleporting."` | Damage block text |
 | `joinCooldownMessage` | `"§cYou must wait {time} seconds after joining before teleporting!"` | Join block text |
 | `regularCooldownMessage` | `"§cYou recently teleported! Please wait {time} seconds before trying again."` | Regular block text |
+| `internalErrorMessage` | `"§cInternal error executing /{command}. Check server log."` | Unexpected command or teleport failure text |
+| `vehicleTooLargeMessage` | `"§cYour vehicle is too big. Dismount and try again.{forceGuidance}"` | Oversized-vehicle text with dismount and conditional force guidance |
+| `forceGuidanceMessage` | `"\n§eUse /{command} force to teleport anyway."` | Conditional guidance inserted by `{forceGuidance}`; cannot contain `{forceGuidance}` itself |
+| `partialTeleportMessage` | `"§eTeleport may have partially completed, but OMWH could not verify every passenger attachment. Check your group before moving again."` | Post-mutation reconciliation warning |
+| `spawnDisabledMessage` | `"§cSpawn teleporting is disabled for this dimension."` | Disabled dimension-route text |
+| `spawnPendingMessage` | `"§eA /{command} safety search is already in progress."` | Duplicate pending-search text |
+| `spawnAnchorChangedMessage` | `"§cWorld spawn changed while OMWH was checking safety. Please try /{command} again."` | Changed spawn-anchor text |
+| `busyMessage` | `"§cOMWH reached its server work limit for this tick. Please try /{command} again."` | Synchronous work-limit text |
+| `passengerTreeTooLargeMessage` | `"§cYour passenger group is too large for OMWH to teleport safely."` | Passenger-cap denial text |
+| `currentWorldUnavailableMessage` | `"§cCannot determine your current world."` | Missing current-world text |
+| `worldSpawnUnavailableMessage` | `"§cCannot determine world spawn."` | Missing world-spawn text |
+| `passengerNotificationMessage` | `"§e{player} teleported you with their vehicle to {destination}."` | Moved passenger notification |
+| `homePassengerDestination` | `"their home"` | Home label inserted into passenger notifications |
+| `spawnPassengerDestination` | `"spawn"` | Spawn label inserted into passenger notifications |
 
 The configuration path is not strict whole-document schema validation: unknown keys remain allowed and omitted keys retain defaults. It is strict only about the JSON primitive types and domain validation of known fields.
 

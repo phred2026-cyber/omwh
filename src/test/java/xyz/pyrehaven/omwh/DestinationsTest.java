@@ -628,8 +628,9 @@ public final class DestinationsTest {
         check(!SpawnDestination.matchesSearchAnchor(original, new BlockPos(81, 70, -40))
                         && !SpawnDestination.matchesSearchAnchor(original, null),
                 "changed or unreadable current anchors reject the pending completion");
-        check(Commands.SPAWN_ANCHOR_CHANGED.toLowerCase().contains("changed")
-                        && Commands.SPAWN_ANCHOR_CHANGED.toLowerCase().contains("again"),
+        OmwhConfig config = new OmwhConfig();
+        check(config.spawnAnchorChangedMessage.toLowerCase().contains("changed")
+                        && config.spawnAnchorChangedMessage.toLowerCase().contains("again"),
                 "anchor cancellation gives explicit safe retry feedback");
     }
 

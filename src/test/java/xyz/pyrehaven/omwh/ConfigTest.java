@@ -10,6 +10,7 @@ public final class ConfigTest {
             missingConfigCreatesCompleteDefaults(root.resolve("missing/omwh.json"));
             existingConfigKeepsDefaultsForOmittedFields(root.resolve("partial.json"));
             dimensionSettingsDefaultWriteAndKeepDefaultsWhenOmitted(root);
+            messageDefaultsAreCompleteAndTyped(root);
             emptyAndUnreadableConfigsUseDefaults(root);
             malformedAndCoercedKnownTypesFailStartup(root);
             unknownFieldsRemainPermissive(root.resolve("unknown.json"));
@@ -25,8 +26,8 @@ public final class ConfigTest {
         OmwhConfig config = OmwhConfig.load(path);
         check(config.homeCommand.equals("home") && config.spawnCommand.equals("spawn"), "default commands");
         check(config.enableForceOverride, "force override enabled by default");
-        check(config.unsafeHomeMessage.equals("§cIt is not safe to teleport here."), "unsafe home default");
-        check(config.unsafeSpawnMessage.equals("§cIt is not safe to teleport here."), "unsafe spawn default");
+        check(config.unsafeHomeMessage.equals("§cIt is not safe to teleport here.{forceGuidance}"), "unsafe home default");
+        check(config.unsafeSpawnMessage.equals("§cIt is not safe to teleport here.{forceGuidance}"), "unsafe spawn default");
         String json = Files.readString(path);
         check(json.contains("\"regularCooldownSeconds\": 30"), "complete default cooldown");
         check(json.contains("\"enableForceOverride\": true"), "complete default force setting");
@@ -46,13 +47,15 @@ public final class ConfigTest {
         OmwhConfig defaults = OmwhConfig.load(defaultsPath);
         check(defaults.enableCrossDimensionTeleport, "cross-dimension teleport enabled by default");
         check(defaults.enableOverworldSpawn, "Overworld spawn enabled by default");
-        check(defaults.enableNetherSpawn, "Nether spawn enabled by default");
-        check(defaults.enableEndSpawn, "End spawn enabled by default");
-        check(defaults.enableModdedDimensionSpawn, "modded-dimension spawn enabled by default");
+        check(!defaults.enableNetherSpawn, "Nether spawn disabled by default");
+        check(!defaults.enableEndSpawn, "End spawn disabled by default");
+        check(!defaults.enableModdedDimensionSpawn, "modded-dimension spawn disabled by default");
         String json = Files.readString(defaultsPath);
-        for (String field : new String[]{"enableCrossDimensionTeleport", "enableOverworldSpawn",
-                "enableNetherSpawn", "enableEndSpawn", "enableModdedDimensionSpawn"}) {
-            check(json.contains("\"" + field + "\": true"), "default file contains " + field);
+        for (String field : new String[]{"enableCrossDimensionTeleport", "enableOverworldSpawn"}) {
+            check(json.contains("\"" + field + "\": true"), "default file contains enabled " + field);
+        }
+        for (String field : new String[]{"enableNetherSpawn", "enableEndSpawn", "enableModdedDimensionSpawn"}) {
+            check(json.contains("\"" + field + "\": false"), "default file contains disabled " + field);
         }
         check(!json.contains("\"rebuildEndPlatform\""),
                 "superseded End platform setting is absent from new defaults");
@@ -61,8 +64,8 @@ public final class ConfigTest {
         Files.writeString(omittedPath, "{\"homeCommand\":\"return\"}");
         OmwhConfig omitted = OmwhConfig.load(omittedPath);
         check(omitted.enableCrossDimensionTeleport && omitted.enableOverworldSpawn
-                        && omitted.enableNetherSpawn && omitted.enableEndSpawn
-                        && omitted.enableModdedDimensionSpawn,
+                        && !omitted.enableNetherSpawn && !omitted.enableEndSpawn
+                        && !omitted.enableModdedDimensionSpawn,
                 "existing configs retain all dimension defaults");
 
         for (String field : new String[]{"enableCrossDimensionTeleport", "enableOverworldSpawn",
@@ -71,6 +74,32 @@ public final class ConfigTest {
             Files.writeString(wrongType, "{\"" + field + "\":\"false\"}");
             expectFailure(() -> OmwhConfig.load(wrongType), field + " quoted boolean");
         }
+    }
+
+    private static void messageDefaultsAreCompleteAndTyped(Path root) throws Exception {
+        Path defaultsPath = root.resolve("message-defaults.json");
+        OmwhConfig defaults = OmwhConfig.load(defaultsPath);
+        check(defaults.internalErrorMessage.contains("{command}"), "internal error command placeholder");
+        check(defaults.vehicleTooLargeMessage.toLowerCase().contains("dismount")
+                        && defaults.vehicleTooLargeMessage.contains("{forceGuidance}"),
+                "vehicle-too-large default offers dismount and conditional force guidance");
+        check(defaults.passengerNotificationMessage.contains("{player}")
+                        && defaults.passengerNotificationMessage.contains("{destination}"),
+                "passenger notification placeholders");
+        String json = Files.readString(defaultsPath);
+        for (String field : new String[]{"internalErrorMessage", "vehicleTooLargeMessage",
+                "forceGuidanceMessage", "partialTeleportMessage", "spawnDisabledMessage", "spawnPendingMessage",
+                "spawnAnchorChangedMessage", "busyMessage", "passengerTreeTooLargeMessage",
+                "currentWorldUnavailableMessage", "worldSpawnUnavailableMessage",
+                "passengerNotificationMessage", "homePassengerDestination", "spawnPassengerDestination"}) {
+            check(json.contains("\"" + field + "\""), "default file contains " + field);
+            Path wrongType = root.resolve(field + "-wrong-type.json");
+            Files.writeString(wrongType, "{\"" + field + "\":false}");
+            expectFailure(() -> OmwhConfig.load(wrongType), field + " known type");
+        }
+        OmwhConfig recursiveGuidance = new OmwhConfig();
+        recursiveGuidance.forceGuidanceMessage = "{forceGuidance}";
+        expectFailure(recursiveGuidance::validate, "recursive force guidance");
     }
 
     private static void emptyAndUnreadableConfigsUseDefaults(Path root) throws Exception {
