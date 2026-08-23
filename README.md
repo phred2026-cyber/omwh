@@ -24,9 +24,9 @@ Server owners can allow valid homes in other dimensions. Missing, destroyed, blo
 
 ### `/spawn`
 
-`/spawn` takes you to the spawn destination selected for your current world. Server owners can control Overworld, Nether, and End spawn travel separately.
+`/spawn` takes you to the spawn destination selected for your current world. Server owners can control Overworld, Nether, End, and modded-dimension spawn travel separately.
 
-Outside the End, OMWH checks a bounded set of already-loaded positions near spawn for solid ground and enough clear space for the player or mounted vehicle. In the End, it uses the existing arrival area by default; server owners can explicitly allow OMWH to rebuild Minecraft's obsidian platform.
+Outside the End, OMWH checks already-loaded positions in expanding hollow 3D cubes around spawn, up to 48 blocks on every axis, for solid ground and enough clear space for the player or mounted vehicle. Each new cube checks only its outer surface; previously checked interior positions aren't repeated. Large searches share a fixed server-wide work budget across ticks instead of freezing one tick, and OMWH cancels a pending result if the player or mounted group changes before it completes. Vehicle searches support roots up to 14 blocks wide and 16 blocks high; larger modded vehicles are reported as too large. Nether spawn uses Minecraft's normal Overworld-to-Nether coordinate scaling and world-border limits. In the End, Minecraft recreates and chooses the normal portal arrival platform, then OMWH checks that exact destination for environmental danger and enough room without searching elsewhere.
 
 ### Bringing vehicles and friends
 
@@ -84,7 +84,7 @@ Edit `config/omwh.json` after the first launch.
 | `enableOverworldSpawn` | `true` | Allow the Overworld spawn destination |
 | `enableNetherSpawn` | `true` | Allow the Nether spawn destination |
 | `enableEndSpawn` | `true` | Allow the End spawn destination |
-| `rebuildEndPlatform` | `false` | Allow `/spawn` in the End to rebuild Minecraft's obsidian arrival platform |
+| `enableModdedDimensionSpawn` | `true` | Allow `/spawn` to stay in the current modded dimension |
 | Message fields | See config | Messages shown to players; supports Minecraft color codes and `{time}` |
 
 Set a cooldown duration to `0` to disable it. Existing configuration files can omit newer fields; OMWH uses the default value for anything missing. Unknown fields are ignored. Known settings must use the documented JSON type, and invalid command names, negative cooldowns, malformed JSON, or other invalid known values stop startup with a clear configuration error instead of being silently ignored.

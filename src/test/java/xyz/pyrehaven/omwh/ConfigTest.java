@@ -48,25 +48,25 @@ public final class ConfigTest {
         check(defaults.enableOverworldSpawn, "Overworld spawn enabled by default");
         check(defaults.enableNetherSpawn, "Nether spawn enabled by default");
         check(defaults.enableEndSpawn, "End spawn enabled by default");
-        check(!defaults.rebuildEndPlatform, "End platform rebuilding disabled by default");
+        check(defaults.enableModdedDimensionSpawn, "modded-dimension spawn enabled by default");
         String json = Files.readString(defaultsPath);
         for (String field : new String[]{"enableCrossDimensionTeleport", "enableOverworldSpawn",
-                "enableNetherSpawn", "enableEndSpawn"}) {
+                "enableNetherSpawn", "enableEndSpawn", "enableModdedDimensionSpawn"}) {
             check(json.contains("\"" + field + "\": true"), "default file contains " + field);
         }
-        check(json.contains("\"rebuildEndPlatform\": false"),
-                "default file contains disabled End platform rebuilding");
+        check(!json.contains("\"rebuildEndPlatform\""),
+                "superseded End platform setting is absent from new defaults");
 
         Path omittedPath = root.resolve("dimension-omitted.json");
         Files.writeString(omittedPath, "{\"homeCommand\":\"return\"}");
         OmwhConfig omitted = OmwhConfig.load(omittedPath);
         check(omitted.enableCrossDimensionTeleport && omitted.enableOverworldSpawn
                         && omitted.enableNetherSpawn && omitted.enableEndSpawn
-                        && !omitted.rebuildEndPlatform,
-                "existing configs retain dimension and End platform defaults");
+                        && omitted.enableModdedDimensionSpawn,
+                "existing configs retain all dimension defaults");
 
         for (String field : new String[]{"enableCrossDimensionTeleport", "enableOverworldSpawn",
-                "enableNetherSpawn", "enableEndSpawn"}) {
+                "enableNetherSpawn", "enableEndSpawn", "enableModdedDimensionSpawn"}) {
             Path wrongType = root.resolve(field + "-wrong-type.json");
             Files.writeString(wrongType, "{\"" + field + "\":\"false\"}");
             expectFailure(() -> OmwhConfig.load(wrongType), field + " quoted boolean");
@@ -99,8 +99,10 @@ public final class ConfigTest {
     }
 
     private static void unknownFieldsRemainPermissive(Path path) throws Exception {
-        Files.writeString(path, "{\"futureSetting\":{\"enabled\":true}}");
-        check(OmwhConfig.load(path).regularCooldownSeconds == 30, "unknown field ignored");
+        Files.writeString(path, "{\"futureSetting\":{\"enabled\":true},"
+                + "\"rebuildEndPlatform\":{\"legacy\":true}}");
+        check(OmwhConfig.load(path).regularCooldownSeconds == 30,
+                "unknown and retired fields are ignored");
     }
 
     private static void initialWriteFailureStillUsesDefaults(Path root) throws Exception {

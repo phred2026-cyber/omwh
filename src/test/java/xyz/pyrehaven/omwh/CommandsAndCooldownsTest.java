@@ -3,9 +3,13 @@ package xyz.pyrehaven.omwh;
 import com.mojang.brigadier.CommandDispatcher;
 import net.minecraft.SharedConstants;
 import net.minecraft.commands.CommandSourceStack;
+import net.minecraft.core.BlockPos;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.server.permissions.LevelBasedPermissionSet;
+import net.minecraft.world.level.block.Blocks;
 
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -17,7 +21,11 @@ public final class CommandsAndCooldownsTest {
         commandFeedbackUsesSpecificMessagesColorsAndPassengerDestination();
         teleportOutcomesUseInternalFailureAndPartialPolicies();
         disabledSpawnFeedbackDoesNotClaimAWorldIsMissing();
-        System.out.println("CommandsAndCooldownsTest PASS (5 behavior groups)");
+        pendingSpawnLifecycleRejectsDuplicatesAndCompletesExactlyOnce();
+        pendingSpawnSchedulingSharesOneFairServerWideBudget();
+        productionPendingSchedulerSlicesRevalidationAndRetiresStaleWork();
+        pendingCommandAdmissionCancelsOnlyCompetingTeleports();
+        System.out.println("CommandsAndCooldownsTest PASS (9 behavior groups)");
     }
 
     private static void forceSyntaxFollowsTheServerSetting() {
@@ -159,6 +167,161 @@ public final class CommandsAndCooldownsTest {
         check(message.contains("disabled"), "disabled spawn has an explicit policy message");
         check(!message.contains("missing") && !message.contains("cannot determine"),
                 "disabled spawn is not reported as a missing world");
+    }
+
+    private static void pendingSpawnLifecycleRejectsDuplicatesAndCompletesExactlyOnce() {
+        Commands.PendingSearches<String, Integer> pending = new Commands.PendingSearches<>();
+        AtomicLong steps = new AtomicLong();
+        List<Integer> completions = new ArrayList<>();
+        Commands.PendingWork<Integer> work = (candidateBudget, worldBudget) -> {
+            long current = steps.incrementAndGet();
+            return current == 3 ? Commands.PendingStep.complete(7, 1, 1) : Commands.PendingStep.pending(1, 1);
+        };
+        check(pending.add("player", work), "first /spawn search becomes pending");
+        check(!pending.add("player", work), "duplicate /spawn cannot replace or double a pending search");
+        check(Commands.SPAWN_PENDING.toLowerCase().contains("already")
+                        && Commands.SPAWN_PENDING.toLowerCase().contains("progress"),
+                "duplicate pending invocation has explicit player feedback");
+        pending.tick(1, 1, completions::add);
+        pending.tick(1, 1, completions::add);
+        check(completions.isEmpty() && pending.size() == 1, "incomplete search remains pending");
+        pending.tick(1, 1, completions::add);
+        pending.tick(1, 1, completions::add);
+        check(completions.equals(List.of(7)) && pending.size() == 0,
+                "successful completion is delivered and removed exactly once");
+        check(pending.add("failure", (candidateBudget, worldBudget) ->
+                        Commands.PendingStep.complete(-1, 1, 1)), "failed search completion added");
+        pending.tick(1, 1, completions::add);
+        pending.tick(1, 1, completions::add);
+        check(completions.equals(List.of(7, -1)) && pending.size() == 0,
+                "failed completion is delivered and removed exactly once");
+
+        check(pending.add("disconnect", (candidateBudget, worldBudget) ->
+                Commands.PendingStep.pending(1, 1)), "disconnect search added");
+        pending.remove("disconnect");
+        check(pending.size() == 0, "disconnect cleanup is bounded direct removal");
+        check(pending.add("a", (candidateBudget, worldBudget) -> Commands.PendingStep.pending(1, 1))
+                        && pending.add("b", (candidateBudget, worldBudget) -> Commands.PendingStep.pending(1, 1)),
+                "stop-cleanup searches added");
+        pending.clear();
+        check(pending.size() == 0, "server-stop cleanup clears all pending searches");
+    }
+
+    private static void pendingSpawnSchedulingSharesOneFairServerWideBudget() {
+        Commands.PendingSearches<Integer, Integer> pending = new Commands.PendingSearches<>();
+        int players = 100;
+        int[] progress = new int[players];
+        for (int player = 0; player < players; player++) {
+            int id = player;
+            check(pending.add(id, (candidateBudget, worldBudget) -> {
+                check(candidateBudget > 0 && worldBudget > 0, "scheduler supplies positive slices");
+                progress[id]++;
+                return Commands.PendingStep.pending(1, 1);
+            }), "fair-search fixture added");
+        }
+
+        Commands.PendingTick first = pending.tick(Commands.SEARCH_CANDIDATES_PER_TICK,
+                Commands.SEARCH_WORLD_WORK_PER_TICK, ignored -> { });
+        check(first.candidatesUsed() <= Commands.SEARCH_CANDIDATES_PER_TICK
+                        && first.worldWorkUsed() <= Commands.SEARCH_WORLD_WORK_PER_TICK,
+                "all players share one aggregate server-wide allowance");
+        for (int player = 0; player < players; player++) {
+            check(progress[player] > 0, "round-robin gives every pending player progress in a busy tick");
+        }
+
+        int[] before = progress.clone();
+        Commands.PendingTick second = pending.tick(50, 50, ignored -> { });
+        check(second.candidatesUsed() == 50 && second.worldWorkUsed() == 50,
+                "smaller aggregate allowance is consumed exactly once across the queue");
+        int advanced = 0;
+        for (int player = 0; player < players; player++) if (progress[player] > before[player]) advanced++;
+        check(advanced == 50, "round-robin advances distinct players before returning to the front");
+    }
+
+    private static void productionPendingSchedulerSlicesRevalidationAndRetiresStaleWork() {
+        Object chunk = new Object();
+        DestinationSafety.ChunkResidency resident = DestinationSafety.ChunkResidency.captureValues(
+                -16, 16, -16, 16, ignored -> chunk);
+        java.util.function.Function<BlockPos, net.minecraft.world.level.block.state.BlockState> safeStates =
+                position -> position.getY() == -1 ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState();
+        SpawnDestination.Search search = new SpawnDestination.Search(
+                SpawnDestination.offsets(0, 0).iterator(),
+                DestinationSafety.SpawnProbe.controlled(
+                        BlockPos.ZERO, 14, 16, resident, safeStates), false);
+        SpawnDestination.Pending route = SpawnDestination.Pending.controlled(
+                search, BlockPos.ZERO, 14,
+                feet -> DestinationSafety.SpawnProbe.controlled(feet, 14, 16, resident, safeStates));
+
+        Commands.PendingSearches<String, SpawnDestination.Result> pending = new Commands.PendingSearches<>();
+        for (int stale = 0; stale < 3; stale++) {
+            check(pending.add("stale-" + stale, (candidateBudget, worldBudget) ->
+                    Commands.PendingStep.complete(new SpawnDestination.Result(
+                            SpawnDestination.Outcome.UNSAFE, null), 0, 0)), "stale completion added");
+        }
+        check(pending.add("valid", (candidateBudget, worldBudget) -> {
+            SpawnDestination.Tick used = route.tick(candidateBudget, worldBudget);
+            return route.complete()
+                    ? Commands.PendingStep.complete(route.result(), used.candidatesStarted(), used.worldWork())
+                    : Commands.PendingStep.pending(used.candidatesStarted(), used.worldWork());
+        }), "production pending route added behind stale completions");
+
+        List<SpawnDestination.Result> completions = new ArrayList<>();
+        java.util.concurrent.atomic.AtomicInteger lifecycleChecks = new java.util.concurrent.atomic.AtomicInteger();
+        long totalWorldWork = 0;
+        int schedulerTicks = 0;
+        Commands.PendingTick first = null;
+        while (pending.size() > 0) {
+            Commands.PendingTick used = pending.tick(Commands.SEARCH_CANDIDATES_PER_TICK,
+                    Commands.SEARCH_WORLD_WORK_PER_TICK, completion -> {
+                        completions.add(completion);
+                        if (completion.incrementalDestinationReady()) {
+                            check(Commands.lifecycleCurrentAtCompletion(() -> {
+                                lifecycleChecks.incrementAndGet();
+                                return true;
+                            }), "accepted pending completion passes its final lifecycle fence");
+                        }
+                    });
+            if (first == null) first = used;
+            check(used.candidatesUsed() <= Commands.SEARCH_CANDIDATES_PER_TICK
+                            && used.worldWorkUsed() <= Commands.SEARCH_WORLD_WORK_PER_TICK,
+                    "actual PendingSearches layer bounds aggregate production work every tick");
+            totalWorldWork += used.worldWorkUsed();
+            schedulerTicks++;
+            check(schedulerTicks < 30, "search and maximum revalidation complete over bounded slices");
+        }
+
+        check(first != null && first.itemsCompleted() == 3 && first.worldWorkUsed() > 0,
+                "multiple zero-work stale completions retire without blocking later valid work");
+        check(Commands.shouldCheckLifecycle(4, 5) && !Commands.shouldCheckLifecycle(5, 5),
+                "production epoch fence checks each pending request once per server tick");
+        Commands.PendingStep<String> failed = Commands.failedPendingStep("failed", 7, 11);
+        check(failed.complete() && failed.candidatesUsed() == 7 && failed.worldWorkUsed() == 11,
+                "pending exceptions conservatively consume their full assigned slice");
+        check(!Commands.shouldLoadDestinationChunks(true)
+                        && Commands.shouldLoadDestinationChunks(false),
+                "incremental spawn skips broad chunk generation while immediate routes retain preparation");
+        long revalidationWorldWork = totalWorldWork - 44_804;
+        check(revalidationWorldWork == 44_804,
+                "maximum 14x16 live revalidation is fully charged across scheduler slices");
+        check(totalWorldWork == 89_608,
+                "search and fresh revalidation both use the production weighted-work accounting");
+        check(completions.size() == 4
+                        && completions.getLast().outcome() == SpawnDestination.Outcome.ACCEPT
+                        && completions.getLast().incrementalDestinationReady(),
+                "stale and accepted lifecycle completions are each delivered exactly once");
+        check(lifecycleChecks.get() == 1,
+                "complete passenger-tree lifecycle validation runs once at accepted completion, not per slice");
+        System.out.printf("Pending scheduler ticks=%d totalWorldWork=%d revalidationWorldWork=%d completions=%d%n",
+                schedulerTicks, totalWorldWork, revalidationWorldWork, completions.size());
+    }
+
+    private static void pendingCommandAdmissionCancelsOnlyCompetingTeleports() {
+        check(Commands.pendingSpawnAction(true, false) == Commands.PendingSpawnAction.REFUSE,
+                "duplicate normal /spawn remains refused");
+        check(Commands.pendingSpawnAction(true, true) == Commands.PendingSpawnAction.CANCEL_AND_CONTINUE,
+                "/spawn force cancels the stale normal search and uses ordinary force admission");
+        check(Commands.pendingSpawnAction(false, false) == Commands.PendingSpawnAction.CONTINUE,
+                "a fresh normal /spawn proceeds");
     }
 
     private static void check(boolean condition, String behavior) {

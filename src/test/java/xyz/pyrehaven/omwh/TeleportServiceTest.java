@@ -16,8 +16,10 @@ public final class TeleportServiceTest {
         incompleteOrInvalidMovedTreesFailAfterOneMutation();
         nullAndExceptionFailuresNeverRetry();
         trackingRefreshRunsOncePerReconciledEntityAndNeverOnFailure();
+        trackingRefreshExceptionsBecomePartialWithoutAnotherMutation();
+        pendingLifecycleFenceRejectsEveryPlanningIdentityChange();
         reconciledPlayerNotificationsExcludeTheCommandPlayer();
-        System.out.println("TeleportServiceTest PASS (7 behavior groups)");
+        System.out.println("TeleportServiceTest PASS (9 behavior groups)");
     }
 
     private static void sameDimensionUsesOneRootMutationAndPreservesEveryIdentity() {
@@ -219,6 +221,51 @@ public final class TeleportServiceTest {
         check(TeleportService.passengerPlayers(List.of(vehicle, commandPlayer, passenger),
                         NODE_TREE, commandPlayer).equals(List.of(passenger)),
                 "notifications use reconciled moved players except the command player");
+    }
+
+    private static void trackingRefreshExceptionsBecomePartialWithoutAnotherMutation() {
+        Object destination = new Object();
+        Node vehicle = Node.entity("vehicle", destination);
+        Node rider = vehicle.add(Node.player("rider", destination));
+        AtomicInteger refreshCalls = new AtomicInteger();
+        TeleportService.Attempt<Node> refreshed = TeleportService.refreshTrackingSafely(
+                new TeleportService.Attempt<>(TeleportService.Outcome.SUCCESS, List.of(vehicle, rider)), NODE_TREE,
+                node -> { refreshCalls.incrementAndGet(); throw new IllegalStateException("tracking"); },
+                node -> refreshCalls.incrementAndGet());
+        check(refreshed.outcome() == TeleportService.Outcome.PARTIAL,
+                "tracking failure after a moved root is classified as partial");
+        check(refreshed.entities().equals(List.of(vehicle, rider)),
+                "partial tracking result retains trustworthy moved players for warnings");
+        check(refreshCalls.get() == 1, "tracking failure stops without retrying or adding another mutation");
+    }
+
+    private static void pendingLifecycleFenceRejectsEveryPlanningIdentityChange() {
+        Object source = new Object();
+        Node root = Node.entity("root", source);
+        Node player = root.add(Node.player("player", source));
+        Node passenger = root.add(Node.entity("passenger", source));
+        TeleportService.LifecycleFence<Node> fence = TeleportService.captureLifecycle(
+                player, root, source, true, 2.0, 1.5, NODE_TREE);
+        check(TeleportService.isLifecycleCurrent(fence, player, root, source,
+                        true, 2.0, 1.5, true, true, NODE_TREE),
+                "unchanged exact player/root/tree/geometry remains current");
+        check(!TeleportService.isLifecycleCurrent(fence, Node.player("respawn", source), root, source,
+                        true, 2.0, 1.5, true, true, NODE_TREE), "respawned player object rejected");
+        check(!TeleportService.isLifecycleCurrent(fence, player, root, new Object(),
+                        true, 2.0, 1.5, true, true, NODE_TREE), "dimension change rejected");
+        check(!TeleportService.isLifecycleCurrent(fence, player, player, source,
+                        false, 2.0, 1.5, true, true, NODE_TREE), "dismount/root change rejected");
+        check(!TeleportService.isLifecycleCurrent(fence, player, root, source,
+                        true, 2.25, 1.5, true, true, NODE_TREE), "root geometry change rejected");
+        check(!TeleportService.isLifecycleCurrent(fence, player, root, source,
+                        true, 2.0, 1.5, false, true, NODE_TREE), "disconnect rejected");
+        check(!TeleportService.isLifecycleCurrent(fence, player, root, source,
+                        true, 2.0, 1.5, true, false, NODE_TREE), "death rejected");
+
+        root.children.remove(passenger);
+        passenger.parent = null;
+        check(!TeleportService.isLifecycleCurrent(fence, player, root, source,
+                        true, 2.0, 1.5, true, true, NODE_TREE), "passenger UUID/edge change rejected");
     }
 
     private static void rejectBeforeMutation(Node root, Object source, Object destination, String behavior) {

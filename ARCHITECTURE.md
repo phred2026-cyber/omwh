@@ -19,7 +19,8 @@ omwh/
 │   │   │   │   # defaults, loading, creation, and validation.
 │   │   │   ├── Commands.java
 │   │   │   │   # Registers the configured /home and /spawn names and owns their shared
-│   │   │   │   # cooldown → destination → teleport → message/effect flow.
+│   │   │   │   # cooldown → destination → teleport → message/effect flow, including pending
+│   │   │   │   # /spawn lifecycles advanced fairly under one server-wide tick budget.
 │   │   │   ├── Cooldowns.java
 │   │   │   │   # Sole owner of regular, PvP, damage, and join cooldown state plus the Fabric
 │   │   │   │   # callbacks that update it. Commands receive one blocking result from this file.
@@ -27,8 +28,8 @@ omwh/
 │   │   │   │   # /home-only policy: vanilla saved-respawn admission and placement across allowed
 │   │   │   │   # dimensions, mounted clearance, and the single uncovered-bed above-bed fallback.
 │   │   │   ├── SpawnDestination.java
-│   │   │   │   # /spawn-only policy: Overworld/Nether/End routing, End obsidian platform behavior,
-│   │   │   │   # and the bounded deterministic safe-location search.
+│   │   │   │   # /spawn-only policy: Overworld/Nether/End/modded-dimension routing, vanilla End
+│   │   │   │   # transition behavior, and resumable deterministic safe-location search state.
 │   │   │   ├── DestinationSafety.java
 │   │   │   │   # Shared placement owner for chunks, build limits, world border, support, hazards,
 │   │   │   │   # fluids, collision, and the required player or mounted-tree footprint.

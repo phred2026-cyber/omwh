@@ -33,15 +33,17 @@ This file is the accepted gameplay contract for the OMWH 1.2.0 release candidate
 ## `/spawn`
 
 - The configured spawn command defaults to `/spawn`.
-- `/spawn force` uses the raw spawn block-center feet position of the destination selected by the same routing settings as normal `/spawn`, without running the ordinary safe-location search. In the End it uses the built-in End arrival position. It rebuilds the obsidian platform only when `rebuildEndPlatform` is enabled. It remains subject to player-source and cooldown rules, and exists only while
+- `/spawn force` uses the exact computed spawn anchor selected by the same routing settings as normal `/spawn`, without calculating vehicle clearance or running any placement-safety check. In the End it uses Minecraft's vanilla End-portal transition unchanged. It remains subject to player-source and cooldown rules, and exists only while
   `enableForceOverride` is enabled. Every player who can use `/spawn` can use this child command.
 - In the Overworld, `/spawn` uses Overworld spawn only while `enableOverworldSpawn` is enabled. If it is disabled, the command is denied without selecting another dimension.
 - In the Nether, enabled `enableNetherSpawn` always selects Nether spawn, regardless of `enableCrossDimensionTeleport`.
 - In the End, enabled `enableEndSpawn` always selects the End arrival destination, regardless of `enableCrossDimensionTeleport`.
 - If Nether or End spawn is disabled, `/spawn` selects Overworld spawn only when both `enableCrossDimensionTeleport` and `enableOverworldSpawn` are enabled. Otherwise it reports that spawn teleporting is disabled for that dimension and performs no mutation.
-- In the End, OMWH uses Minecraft 26.2's built-in arrival position with vanilla's west-facing orientation. By default it checks the existing blocks and refuses an obstructed or unsupported destination without changing the world. When `rebuildEndPlatform` is enabled, it may recreate Minecraft's obsidian arrival platform after side-effect-free acceptance checks. It does not run the ordinary spawn search there.
-- Outside the End-specific rule, OMWH searches deterministic nearest horizontal columns within 64 blocks. When Nether `/spawn` inherits an Overworld spawn position, it keeps that spawn's X/Z but anchors the safety search at the Nether generator's sea level, checks all 16,641 columns on that plane, then checks up to 4,096 nearby columns from 2 blocks below through 10 blocks above. Other dimensions check up to 4,096 columns across that vertical range. Candidate checks read only already-loaded chunks and never generate terrain. If world spawn cannot be read, the command fails explicitly instead of inventing fallback coordinates.
-- The destination must support and contain the square footprint derived from the player or root vehicle size, with enough clear height for that root.
+- In a modded dimension, enabled `enableModdedDimensionSpawn` keeps `/spawn` in that dimension. When disabled, it selects Overworld spawn only when both cross-dimension travel and Overworld spawn are enabled; otherwise the command is denied.
+- In the End, OMWH asks Minecraft's public End-portal destination API for an arrival as though the root entity entered from the Overworld. Minecraft recreates the platform and supplies its player/non-player arrival height, west-facing orientation, relative movement flags, portal ticket, sound, and unavailable-destination result. Normal `/spawn` then checks only that exact regenerated destination for fit, collision, support, fluids, hazards, build height, and world border; it never searches away from the platform. `/spawn force` uses the same vanilla transition but skips those placement and size checks.
+- Every non-End route starts from `server.overworld().getRespawnData().pos()`. Overworld and modded dimensions keep that block unchanged. Nether X/Z use Minecraft's portal coordinate scale on the spawn block center and Minecraft's destination world-border clamp; Y remains the Overworld spawn Y.
+- Normal non-End `/spawn` checks one lazy deterministic sequence: origin first, then expanding hollow three-dimensional cubes through radius 48. Each shell contains only positions where at least one of X, Y, or Z is exactly that radius, so positions inside earlier shells are never checked again. Within each shell offsets are ordered by X, then Y, then Z. Every offset in `[-48,48] x [-48,48] x [-48,48]` is checked exactly once. Candidate checks use one search-local chunk-residency snapshot, read only already-loaded chunks, and never generate terrain. A wholly cold search volume is rejected before block reads; otherwise exhaustive work resumes deterministically across server ticks under one fair server-wide candidate/collision-work budget. A pending search is cancelled if its player, dimension, vehicle geometry, or passenger tree changes. `/home` and `/spawn force` also cancel it; a duplicate normal `/spawn` is refused. Cooldowns and the accepted footprint are checked again immediately before mutation. If world spawn cannot be read, the command fails explicitly instead of inventing fallback coordinates.
+- The destination must support and contain the square footprint derived from the player or root vehicle size, with enough clear height for that root. Incremental search supports root footprints through 14 blocks wide and 16 blocks high; larger modded roots retain the player-only diagnostic and are reported as too large without expanding the chunk snapshot.
 - If the mounted group cannot fit but an unmounted player could, the command explains that the vehicle is too large and asks the player to dismount. If no safe destination exists, it reports the configured unsafe-spawn failure.
 
 ## Shared destination safety
@@ -55,7 +57,7 @@ checks and no other admission rule.
 - Mounted `/home` checks the translated root-vehicle bounds, the required horizontal and upper clearance margins, block collision, fluids and hazards in the vehicle space or supporting layer, the configured-bed exemption, and the world border. Passenger hitboxes do not enlarge this clearance volume.
 - `/spawn` requires full-block support beneath the complete square root footprint and clear occupied blocks through the required root height.
 - `/spawn` rejects fluids and hazardous blocks, including exact fire, soul fire, lava, magma, cactus, sweet berry bush, wither rose, and powder snow blocks. Names that merely contain those words, such as fire coral, are not hazards.
-- After selecting any accepted home or spawn destination, OMWH loads the fixed five-by-five chunk area around it before teleport mutation.
+- Immediate `/home`, `/spawn force`, and End arrivals load the fixed five-by-five chunk area before teleport mutation. Normal searched `/spawn` remains loaded-only: its final resumable probe recaptures current loaded chunks and fails closed instead of generating a destination area.
 - Released placement checks do not reject external entities. Self-collision and broader passenger-tree collision rules are decisions for later feature work, not preserved behavior.
 - Safety decisions are deterministic. An unsafe candidate is a denial, not permission to use an unchecked fallback.
 
@@ -64,7 +66,7 @@ checks and no other admission rule.
 - Teleporting a mounted player moves the root vehicle and its complete recursive passenger tree, including non-player entities and other player passengers.
 - `TeleportService` captures entity identity and every parent-child attachment before mutation.
 - Same- and cross-dimension movement is performed by one recursive teleport of the root entity. OMWH does not manually dismount, move, and remount the tree.
-- Destination placement uses feet coordinates and preserves the captured attachment graph. A successful move clears carried root velocity, then refreshes Minecraft tracking for the reconciled parent-first tree so clients immediately receive moved vehicles and riders.
+- Destination placement uses feet coordinates and preserves the captured attachment graph. Ordinary OMWH destinations clear carried root velocity after a successful move; the vanilla End-portal transition retains Minecraft's own relative movement handling. Successful moves then refresh Minecraft tracking for the reconciled tree so clients immediately receive moved vehicles and riders.
 - A null teleport result or teleport exception supplies no moved root and is logged as an internal command failure with no passenger notification or regular cooldown. Once Minecraft returns a moved root, a failed passenger-tree reconciliation is reported as a possible partial teleport; OMWH notifies trustworthy moved player passengers, records the regular cooldown to prevent free retries, and does not promise rollback.
 - Player passengers receive a message naming the command user and whether the group traveled to home or spawn.
 
@@ -112,11 +114,11 @@ Cooldown state is keyed by player UUID and owned only by `Cooldowns`.
 | `playTeleportSound` | `true` | Enables the pre-mutation teleport-attempt sound |
 | `spawnTeleportParticles` | `true` | Enables pre-mutation teleport-attempt particles |
 | `enableForceOverride` | `true` | Registers the player-usable literal `force` child for both commands |
-| `enableCrossDimensionTeleport` | `true` | Allows valid cross-dimension homes and eligible Nether/End-to-Overworld spawn routes |
+| `enableCrossDimensionTeleport` | `true` | Allows valid cross-dimension homes and eligible Nether/End/modded-to-Overworld spawn routes |
 | `enableOverworldSpawn` | `true` | Allows Overworld spawn as the current or selected destination |
 | `enableNetherSpawn` | `true` | Allows Nether spawn while the player is in the Nether |
 | `enableEndSpawn` | `true` | Allows the End arrival destination while the player is in the End |
-| `rebuildEndPlatform` | `false` | Allows End `/spawn` to rebuild Minecraft's obsidian arrival platform after acceptance checks |
+| `enableModdedDimensionSpawn` | `true` | Allows `/spawn` to stay in the current modded dimension |
 | `homeSuccessMessage` | `"§aTeleported to your home!"` | `/home` success text |
 | `spawnSuccessMessage` | `"§aTeleported to world spawn!"` | `/spawn` success text |
 | `noHomepointMessage` | `"§cYou don't have a spawn point set!"` | Missing or invalid home text |

@@ -1,47 +1,202 @@
 package xyz.pyrehaven.omwh;
 
 import net.minecraft.core.BlockPos;
-import net.minecraft.core.Direction;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.level.Level;
-import net.minecraft.world.level.levelgen.feature.EndPlatformFeature;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.Portal;
+import net.minecraft.world.level.dimension.DimensionType;
+import net.minecraft.world.level.portal.TeleportTransition;
 import net.minecraft.world.level.storage.LevelData;
 import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.ArrayList;
-import java.util.Comparator;
 import java.util.Iterator;
-import java.util.List;
 import java.util.NoSuchElementException;
-
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 public final class SpawnDestination {
     private static final Logger LOGGER = LoggerFactory.getLogger("omwh");
-    static final int RADIUS = 64;
-    static final int MIN_Y_OFFSET = -2;
-    static final int MAX_Y_OFFSET = 10;
-    static final int MAX_CANDIDATES = 4_096;
-    static final int HORIZONTAL_COLUMNS = (RADIUS * 2 + 1) * (RADIUS * 2 + 1);
-    private static final List<HorizontalOffset> PRODUCTION_HORIZONTAL = horizontalOffsets(RADIUS);
+    static final int HORIZONTAL_BOUND = 48;
+    static final int VERTICAL_BOUND = 48;
+    static final int MAX_ROOT_WIDTH = 14;
+    static final int MAX_ROOT_HEIGHT = 16;
 
     record Offset(int x, int y, int z) { }
-
-    record EndPlatform(BlockPos platformAnchor, Vec3 feet, float yaw, float pitch) { }
     enum Dimension { OVERWORLD, NETHER, END, OTHER }
     enum Target { CURRENT, OVERWORLD, DISABLED }
     enum Outcome { ACCEPT, VEHICLE_TOO_LARGE, UNSAFE, NO_WORLD_SPAWN }
-    record Selection(Outcome outcome, Offset offset, int columnsVisited, int candidatesVisited,
+    record Selection(Outcome outcome, Offset offset, int candidatesVisited,
                      int rootChecks, int playerChecks) { }
-    record Result(Outcome outcome, DestinationSafety.Prepared destination) { }
-    private record HorizontalOffset(int x, int z, long distanceSquared) { }
+    record Result(Outcome outcome, DestinationSafety.Prepared destination,
+                  boolean incrementalDestinationReady, BlockPos searchAnchor) {
+        Result(Outcome outcome, DestinationSafety.Prepared destination) {
+            this(outcome, destination, false, null);
+        }
+    }
+    enum ProbeKind { ROOT, PLAYER }
+    enum ProbeOutcome { INCOMPLETE, FITS, REJECTED }
+    record ProbeStep(ProbeOutcome outcome, int worldWork) { }
+    record Tick(int candidatesStarted, int worldWork) { }
+    record Start(Search search, Selection selection) {
+        boolean complete() { return selection != null; }
+    }
+    record Plan(Result immediate, Pending pending) { }
+
+    interface CandidateProbe {
+        void begin(Offset offset, ProbeKind kind);
+        ProbeStep step(int availableWorldWork);
+    }
+
+    static final class Search {
+        private final Iterator<Offset> candidates;
+        private final CandidateProbe probe;
+        private final boolean mounted;
+        private Offset active;
+        private ProbeKind activeKind;
+        private boolean playerCouldFit;
+        private int visited;
+        private int rootChecks;
+        private int playerChecks;
+        private Selection selection;
+
+        Search(Iterator<Offset> candidates, CandidateProbe probe, boolean mounted) {
+            this.candidates = candidates;
+            this.probe = probe;
+            this.mounted = mounted;
+        }
+
+        Tick tick(int candidateBudget, int worldWorkBudget) {
+            if (candidateBudget <= 0 || worldWorkBudget <= 0) {
+                throw new IllegalArgumentException("search budgets must be positive");
+            }
+            int candidatesStarted = 0;
+            int worldWork = 0;
+            while (selection == null && candidatesStarted < candidateBudget && worldWork < worldWorkBudget) {
+                if (active == null) {
+                    if (!candidates.hasNext()) {
+                        selection = new Selection(playerCouldFit ? Outcome.VEHICLE_TOO_LARGE : Outcome.UNSAFE,
+                                null, visited, rootChecks, playerChecks);
+                        break;
+                    }
+                    active = candidates.next();
+                    activeKind = ProbeKind.ROOT;
+                    visited++;
+                    rootChecks++;
+                    candidatesStarted++;
+                    probe.begin(active, activeKind);
+                }
+                ProbeStep step = probe.step(worldWorkBudget - worldWork);
+                if (step.worldWork < 0 || worldWork + step.worldWork > worldWorkBudget) {
+                    throw new IllegalStateException("candidate probe exceeded its world-work allowance");
+                }
+                worldWork += step.worldWork;
+                if (step.outcome == ProbeOutcome.INCOMPLETE) break;
+                if (step.outcome == ProbeOutcome.FITS) {
+                    if (activeKind == ProbeKind.ROOT) {
+                        selection = new Selection(Outcome.ACCEPT, active, visited, rootChecks, playerChecks);
+                        break;
+                    }
+                    playerCouldFit = true;
+                }
+                if (activeKind == ProbeKind.ROOT && mounted && !playerCouldFit) {
+                    activeKind = ProbeKind.PLAYER;
+                    playerChecks++;
+                    probe.begin(active, activeKind);
+                } else {
+                    active = null;
+                }
+            }
+            return new Tick(candidatesStarted, worldWork);
+        }
+
+        boolean complete() { return selection != null; }
+
+        Selection selection() {
+            if (selection == null) throw new IllegalStateException("search is not complete");
+            return selection;
+        }
+    }
+
+    static final class Pending {
+        private final Search search;
+        private final ServerLevel level;
+        private final BlockPos center;
+        private final BlockPos searchAnchor;
+        private final int rootWidth;
+        private final float yaw;
+        private final float pitch;
+        private final Function<BlockPos, DestinationSafety.SpawnProbe> freshProbe;
+        private DestinationSafety.SpawnProbe revalidation;
+        private DestinationSafety.Prepared destination;
+        private Result result;
+
+        private Pending(Search search, ServerLevel level, BlockPos center, BlockPos searchAnchor,
+                        int rootWidth, float yaw, float pitch,
+                        Function<BlockPos, DestinationSafety.SpawnProbe> freshProbe) {
+            this.search = search;
+            this.level = level;
+            this.center = center;
+            this.searchAnchor = searchAnchor;
+            this.rootWidth = rootWidth;
+            this.yaw = yaw;
+            this.pitch = pitch;
+            this.freshProbe = freshProbe;
+        }
+
+        Tick tick(int candidateBudget, int worldWorkBudget) {
+            if (result != null) throw new IllegalStateException("pending spawn is already complete");
+            if (!search.complete()) {
+                Tick used = search.tick(candidateBudget, worldWorkBudget);
+                if (!search.complete()) return used;
+                Selection selection = search.selection();
+                if (selection.outcome != Outcome.ACCEPT) {
+                    result = new Result(selection.outcome, null);
+                    return used;
+                }
+                BlockPos feet = feet(center, selection.offset);
+                double centerOffset = rootWidth % 2 == 0 ? 0.0 : 0.5;
+                destination = DestinationSafety.Prepared.ordinary(level,
+                        new Vec3(feet.getX() + centerOffset, feet.getY(), feet.getZ() + centerOffset), yaw, pitch);
+                revalidation = freshProbe.apply(feet);
+                revalidation.begin(new Offset(0, 0, 0), ProbeKind.ROOT);
+                return used;
+            }
+
+            ProbeStep checked = revalidation.step(worldWorkBudget);
+            if (checked.outcome == ProbeOutcome.REJECTED) {
+                result = new Result(Outcome.UNSAFE, null);
+            } else if (checked.outcome == ProbeOutcome.FITS) {
+                result = new Result(Outcome.ACCEPT, destination, true, searchAnchor);
+            }
+            return new Tick(0, checked.worldWork);
+        }
+
+        boolean complete() { return result != null; }
+
+        Result result() {
+            if (result == null) throw new IllegalStateException("pending spawn is not complete");
+            return result;
+        }
+
+        static Pending controlled(Search search, BlockPos center, int rootWidth,
+                                  Function<BlockPos, DestinationSafety.SpawnProbe> freshProbe) {
+            return new Pending(search, null, center, center, rootWidth, 0, 0,
+                    freshProbe);
+        }
+    }
+
+    @FunctionalInterface
+    interface AnchorClamp {
+        BlockPos clamp(double x, double y, double z);
+    }
 
     private SpawnDestination() { }
 
@@ -53,28 +208,39 @@ public final class SpawnDestination {
     }
 
     static Target route(Dimension current, boolean crossDimensionEnabled,
-                        boolean overworldEnabled, boolean netherEnabled, boolean endEnabled) {
+                        boolean overworldEnabled, boolean netherEnabled, boolean endEnabled,
+                        boolean moddedDimensionEnabled) {
         boolean currentEnabled = switch (current) {
             case OVERWORLD -> overworldEnabled;
             case NETHER -> netherEnabled;
             case END -> endEnabled;
-            case OTHER -> false;
+            case OTHER -> moddedDimensionEnabled;
         };
         if (currentEnabled) return Target.CURRENT;
-        if ((current == Dimension.NETHER || current == Dimension.END)
-                && crossDimensionEnabled && overworldEnabled) {
+        if (current != Dimension.OVERWORLD && crossDimensionEnabled && overworldEnabled) {
             return Target.OVERWORLD;
         }
         return Target.DISABLED;
     }
 
-    static Iterable<Offset> offsets(int radius, int minY, int maxY) {
-        if (radius < 0 || minY > maxY) throw new IllegalArgumentException("invalid search bounds");
-        List<HorizontalOffset> horizontal = radius == RADIUS ? PRODUCTION_HORIZONTAL : horizontalOffsets(radius);
-        return () -> new OffsetIterator(horizontal, verticalOffsets(minY, maxY));
+    static Iterable<Offset> offsets(int horizontalBound, int verticalBound) {
+        if (horizontalBound < 0 || verticalBound < horizontalBound) {
+            throw new IllegalArgumentException("invalid search bounds");
+        }
+        return () -> new OffsetIterator(horizontalBound, verticalBound);
     }
 
-    static Vec3 rawPosition(BlockPos spawn) { return Vec3.atBottomCenterOf(spawn); }
+    static boolean rootGeometrySupported(int rootWidth, int rootHeight) {
+        return rootWidth <= MAX_ROOT_WIDTH && rootHeight <= MAX_ROOT_HEIGHT;
+    }
+
+    static int searchRootWidth(int rootWidth, int rootHeight) {
+        return rootGeometrySupported(rootWidth, rootHeight) ? rootWidth : 1;
+    }
+
+    static Vec3 rawPosition(BlockPos spawn) {
+        return Vec3.atBottomCenterOf(spawn);
+    }
 
     static <T> T readSpawnData(Supplier<T> reader, Consumer<RuntimeException> failureHandler) {
         try {
@@ -89,64 +255,47 @@ public final class SpawnDestination {
         return readSpawnData(reader, failureHandler);
     }
 
-    static BlockPos searchCenter(BlockPos spawn, boolean spawnDimensionMatches, Dimension targetDimension,
-                                 int seaLevel, int minY, int logicalHeight) {
-        if (spawnDimensionMatches || targetDimension != Dimension.NETHER) return spawn;
-        int minimumFeetY = minY + 1;
-        int maximumFeetY = minY + logicalHeight - 1;
-        int anchoredY = Math.max(minimumFeetY, Math.min(maximumFeetY, seaLevel));
-        return new BlockPos(spawn.getX(), anchoredY, spawn.getZ());
+    static BlockPos scaledAnchor(BlockPos overworldSpawn, double scale, AnchorClamp clamp) {
+        Vec3 center = Vec3.atCenterOf(overworldSpawn);
+        return clamp.clamp(center.x * scale, overworldSpawn.getY(), center.z * scale);
     }
 
-    static EndPlatform endPlatform(BlockPos spawn, float westYaw) {
-        Vec3 vanillaPosition = Vec3.atBottomCenterOf(spawn);
-        return new EndPlatform(BlockPos.containing(vanillaPosition).below(),
-                vanillaPosition.subtract(0, 1, 0), westYaw, 0.0f);
+    static BlockPos currentAnchor(LevelData.RespawnData spawnData, boolean nether,
+                                  double scale, AnchorClamp clamp) {
+        return currentAnchor(spawnData == null ? null : spawnData.pos(), nether, scale, clamp);
     }
 
-    static Outcome acceptEnd(boolean rebuildPlatform, BooleanSupplier rootFits,
-                             BooleanSupplier playerFits, Runnable createPlatform) {
-        if (!rootFits.getAsBoolean()) {
-            return playerFits != null && playerFits.getAsBoolean() ? Outcome.VEHICLE_TOO_LARGE : Outcome.UNSAFE;
-        }
-        createEndPlatformIfEnabled(rebuildPlatform, createPlatform);
-        return Outcome.ACCEPT;
+    static BlockPos currentAnchor(BlockPos overworldSpawn, boolean nether,
+                                  double scale, AnchorClamp clamp) {
+        if (overworldSpawn == null) return null;
+        return nether ? scaledAnchor(overworldSpawn, scale, clamp) : overworldSpawn;
     }
 
-    static void createEndPlatformIfEnabled(boolean rebuildPlatform, Runnable createPlatform) {
-        if (rebuildPlatform) createPlatform.run();
+    static boolean matchesSearchAnchor(BlockPos searchAnchor, BlockPos currentAnchor) {
+        return searchAnchor != null && searchAnchor.equals(currentAnchor);
+    }
+
+    static BlockPos currentAnchor(ServerLevel level) {
+        LevelData.RespawnData spawnData = readSpawnData(
+                () -> level.getServer().overworld().getRespawnData(),
+                failure -> LOGGER.error("Could not re-read Overworld spawn for OMWH /spawn", failure));
+        boolean nether = level.dimension().equals(Level.NETHER);
+        double scale = nether ? DimensionType.getTeleportationScale(
+                level.getServer().overworld().dimensionType(), level.dimensionType()) : 1.0;
+        return currentAnchor(spawnData, nether, scale, level.getWorldBorder()::clampToBounds);
     }
 
     static Selection select(Iterable<Offset> candidates, Predicate<Offset> rootFits,
                             Predicate<Offset> playerFits) {
-        return select(candidates, MAX_CANDIDATES, rootFits, playerFits);
-    }
-
-    static Selection select(Iterable<Offset> candidates, int maxCandidates,
-                            Predicate<Offset> rootFits, Predicate<Offset> playerFits) {
-        if (maxCandidates < 0) throw new IllegalArgumentException("maxCandidates must be nonnegative");
-        int columnsVisited = 0;
         int visited = 0;
         int rootChecks = 0;
         int playerChecks = 0;
         boolean playerCouldFit = false;
-        int previousX = 0;
-        int previousZ = 0;
-        boolean first = true;
         for (Offset candidate : candidates) {
-            boolean newColumn = first || candidate.x != previousX || candidate.z != previousZ;
-            if (newColumn) {
-                if (columnsVisited >= maxCandidates) break;
-                columnsVisited++;
-                previousX = candidate.x;
-                previousZ = candidate.z;
-                first = false;
-            }
             visited++;
             rootChecks++;
             if (rootFits.test(candidate)) {
-                return new Selection(Outcome.ACCEPT, candidate, columnsVisited, visited,
-                        rootChecks, playerChecks);
+                return new Selection(Outcome.ACCEPT, candidate, visited, rootChecks, playerChecks);
             }
             if (playerFits != null) {
                 playerChecks++;
@@ -154,136 +303,182 @@ public final class SpawnDestination {
             }
         }
         return new Selection(playerCouldFit ? Outcome.VEHICLE_TOO_LARGE : Outcome.UNSAFE,
-                null, columnsVisited, visited, rootChecks, playerChecks);
+                null, visited, rootChecks, playerChecks);
     }
 
-    static Result find(ServerPlayer player, ServerLevel level, boolean force, boolean rebuildEndPlatform) {
+    static Start start(Iterator<Offset> candidates, CandidateProbe probe, boolean mounted,
+                       DestinationSafety.ChunkResidency residency) {
+        if (residency.fullyCold()) {
+            return new Start(null, new Selection(Outcome.UNSAFE, null, 0, 0, 0));
+        }
+        return new Start(new Search(candidates, probe, mounted), null);
+    }
+
+    static Outcome acceptEnd(boolean force, BooleanSupplier rootFits, BooleanSupplier playerFits) {
+        if (force || rootFits.getAsBoolean()) return Outcome.ACCEPT;
+        return playerFits != null && playerFits.getAsBoolean()
+                ? Outcome.VEHICLE_TOO_LARGE : Outcome.UNSAFE;
+    }
+
+    static Plan plan(ServerPlayer player, ServerLevel level, boolean force) {
+        if (level.dimension().equals(Level.END)) return new Plan(findEnd(player, level, force), null);
+
+        LevelData.RespawnData spawnData = readSpawnData(
+                () -> level.getServer().overworld().getRespawnData(),
+                failure -> LOGGER.error("Could not read Overworld spawn for OMWH /spawn", failure));
+        if (spawnData == null || spawnData.pos() == null) {
+            return new Plan(new Result(Outcome.NO_WORLD_SPAWN, null), null);
+        }
+
+        boolean nether = level.dimension().equals(Level.NETHER);
+        double scale = nether ? DimensionType.getTeleportationScale(
+                level.getServer().overworld().dimensionType(), level.dimensionType()) : 1.0;
+        BlockPos anchor = currentAnchor(spawnData, nether, scale, level.getWorldBorder()::clampToBounds);
+
         Entity root = player.getRootVehicle();
+        if (force) {
+            return new Plan(accepted(DestinationSafety.Prepared.ordinary(
+                    level, rawPosition(anchor), root.getYRot(), root.getXRot())), null);
+        }
+
         int rootWidth = root == player ? 1 : (int) Math.max(1, Math.ceil(root.getBbWidth()));
         int rootHeight = root == player ? 2 : (int) Math.max(3, Math.ceil(root.getBbHeight()) + 2);
-        if (level.dimension().equals(Level.END)) {
-            return findEnd(level, root, player, force, rebuildEndPlatform);
-        }
-
-        LevelData.RespawnData spawnData = readSpawnData(level::getRespawnData, failure ->
-                LOGGER.error("Could not read world spawn for OMWH /spawn", failure));
-        if (spawnData == null || spawnData.pos() == null) {
-            return new Result(Outcome.NO_WORLD_SPAWN, null);
-        }
-        BlockPos rawCenter = spawnData.pos();
-        if (force) {
-            return new Result(Outcome.ACCEPT, new DestinationSafety.Prepared(level,
-                    rawPosition(rawCenter), root.getYRot(), root.getXRot()));
-        }
-
-        Dimension targetDimension = dimension(level);
-        boolean spawnDimensionMatches = spawnData.dimension().equals(level.dimension());
-        BlockPos center = searchCenter(rawCenter, spawnDimensionMatches, targetDimension,
-                level.getSeaLevel(), level.getMinY(), level.getLogicalHeight());
-        Selection selection = targetDimension == Dimension.NETHER && !spawnDimensionMatches
-                ? selectLoaded(level, center, rootWidth, rootHeight, root,
-                        offsets(RADIUS, 0, 0), HORIZONTAL_COLUMNS)
-                : null;
-        if (selection == null || selection.outcome() != Outcome.ACCEPT) {
-            Selection fallback = selectLoaded(level, center, rootWidth, rootHeight, root,
-                    offsets(RADIUS, MIN_Y_OFFSET, MAX_Y_OFFSET), MAX_CANDIDATES);
-            if (fallback.outcome() == Outcome.ACCEPT
-                    || selection == null
-                    || selection.outcome() != Outcome.VEHICLE_TOO_LARGE) {
-                selection = fallback;
-            }
-        }
-        if (selection.outcome != Outcome.ACCEPT) return new Result(selection.outcome, null);
-
-        BlockPos feet = feet(center, selection.offset);
-        double centerOffset = rootWidth % 2 == 0 ? 0.0 : 0.5;
-        return new Result(Outcome.ACCEPT, new DestinationSafety.Prepared(level,
-                new Vec3(feet.getX() + centerOffset, feet.getY(), feet.getZ() + centerOffset),
-                root.getYRot(), root.getXRot()));
+        boolean rootGeometrySupported = rootGeometrySupported(rootWidth, rootHeight);
+        int residencyWidth = searchRootWidth(rootWidth, rootHeight);
+        BlockPos center = anchor;
+        int halfWidth = (residencyWidth + 1) / 2;
+        DestinationSafety.ChunkResidency residency = DestinationSafety.ChunkResidency.captureValues(
+                center.getX() - HORIZONTAL_BOUND - halfWidth - 1,
+                center.getX() + HORIZONTAL_BOUND + halfWidth + 1,
+                center.getZ() - HORIZONTAL_BOUND - halfWidth - 1,
+                center.getZ() + HORIZONTAL_BOUND + halfWidth + 1,
+                chunk -> level.getChunkSource().getChunkNow((int) (chunk >> 32), (int) chunk));
+        DestinationSafety.SpawnProbe probe = new DestinationSafety.SpawnProbe(
+                level, center, rootWidth, rootHeight, rootGeometrySupported, residency);
+        Start start = start(offsets(HORIZONTAL_BOUND, VERTICAL_BOUND).iterator(),
+                probe, root != player, residency);
+        if (start.complete()) return new Plan(new Result(start.selection.outcome, null), null);
+        return new Plan(null, new Pending(start.search, level, center, anchor, rootWidth,
+                root.getYRot(), root.getXRot(),
+                feet -> {
+                    double centerOffset = rootWidth % 2 == 0 ? 0.0 : 0.5;
+                    DestinationSafety.Footprint footprint = DestinationSafety.footprint(
+                            feet.getX() + centerOffset, feet.getZ() + centerOffset, rootWidth);
+                    DestinationSafety.ChunkResidency fresh = DestinationSafety.ChunkResidency.captureValues(
+                            footprint.minX() - 1, footprint.maxX() + 1,
+                            footprint.minZ() - 1, footprint.maxZ() + 1,
+                            chunk -> level.getChunkSource().getChunkNow((int) (chunk >> 32), (int) chunk));
+                    return new DestinationSafety.SpawnProbe(
+                            level, feet, rootWidth, rootHeight, true, fresh);
+                }));
     }
 
-    private static Selection selectLoaded(ServerLevel level, BlockPos center,
-                                          int rootWidth, int rootHeight, Entity root,
-                                          Iterable<Offset> candidates, int maxColumns) {
-        return select(candidates, maxColumns,
-                offset -> DestinationSafety.spawnFits(
-                        level, feet(center, offset), rootWidth, rootHeight),
-                root instanceof ServerPlayer ? null
-                        : offset -> DestinationSafety.spawnFits(
-                                level, feet(center, offset), 1, 2));
+    private static Result findEnd(ServerPlayer player, ServerLevel endLevel, boolean force) {
+        Entity root = player.getRootVehicle();
+        TeleportTransition transition = ((Portal) Blocks.END_PORTAL).getPortalDestination(
+                endLevel.getServer().overworld(), root, BlockPos.ZERO);
+        if (transition == null) return new Result(Outcome.NO_WORLD_SPAWN, null);
+
+        Vec3 playerPosition = Vec3.atBottomCenterOf(ServerLevel.END_SPAWN_POINT).subtract(0, 1, 0);
+        Outcome outcome = acceptEnd(force,
+                () -> DestinationSafety.endFits(transition.newLevel(), root, transition.position()),
+                root == player ? null
+                        : () -> DestinationSafety.endFits(transition.newLevel(), player, playerPosition));
+        return outcome == Outcome.ACCEPT
+                ? accepted(new DestinationSafety.Prepared(transition))
+                : new Result(outcome, null);
     }
 
-    private static Result findEnd(ServerLevel level, Entity root, ServerPlayer player,
-                                  boolean force, boolean rebuildPlatform) {
-        EndPlatform platform = endPlatform(ServerLevel.END_SPAWN_POINT, Direction.WEST.toYRot());
-        if (force) {
-            createEndPlatformIfEnabled(rebuildPlatform,
-                    () -> EndPlatformFeature.createEndPlatform(level, platform.platformAnchor, true));
-            return new Result(Outcome.ACCEPT, new DestinationSafety.Prepared(level,
-                    platform.feet, platform.yaw, platform.pitch));
-        }
-        Outcome outcome = acceptEnd(rebuildPlatform,
-                () -> DestinationSafety.endFits(
-                        level, root, platform.feet, platform.platformAnchor, rebuildPlatform),
-                root == player ? null : () -> DestinationSafety.endFits(
-                        level, player, platform.feet, platform.platformAnchor, rebuildPlatform),
-                () -> EndPlatformFeature.createEndPlatform(level, platform.platformAnchor, true));
-        if (outcome != Outcome.ACCEPT) return new Result(outcome, null);
-        return new Result(Outcome.ACCEPT, new DestinationSafety.Prepared(level,
-                platform.feet,
-                platform.yaw, platform.pitch));
+    private static Result accepted(DestinationSafety.Prepared destination) {
+        return new Result(Outcome.ACCEPT, destination);
     }
 
     private static BlockPos feet(BlockPos center, Offset offset) {
         return center.offset(offset.x, offset.y, offset.z);
     }
 
-    private static List<HorizontalOffset> horizontalOffsets(int radius) {
-        List<HorizontalOffset> horizontal = new ArrayList<>((2 * radius + 1) * (2 * radius + 1));
-        for (int x = -radius; x <= radius; x++) {
-            for (int z = -radius; z <= radius; z++) {
-                horizontal.add(new HorizontalOffset(x, z, (long) x * x + (long) z * z));
-            }
-        }
-        horizontal.sort(Comparator.comparingLong(HorizontalOffset::distanceSquared)
-                .thenComparingInt(HorizontalOffset::x).thenComparingInt(HorizontalOffset::z));
-        return List.copyOf(horizontal);
-    }
-
-    private static List<Integer> verticalOffsets(int minY, int maxY) {
-        List<Integer> vertical = new ArrayList<>(maxY - minY + 1);
-        for (int y = minY; y <= maxY; y++) vertical.add(y);
-        vertical.sort(Comparator.comparingInt((Integer y) -> Math.abs(y)).thenComparingInt(y -> y));
-        return List.copyOf(vertical);
-    }
-
+    /** Expands by Chebyshev radius and emits x, then y, then z lexicographically within each shell. */
     private static final class OffsetIterator implements Iterator<Offset> {
-        private final List<HorizontalOffset> horizontal;
-        private final List<Integer> vertical;
-        private int horizontalIndex;
-        private int verticalIndex;
+        private final int horizontalBound;
+        private final int verticalBound;
+        private int radius;
+        private int x;
+        private int y;
+        private int z;
+        private boolean available = true;
 
-        private OffsetIterator(List<HorizontalOffset> horizontal, List<Integer> vertical) {
-            this.horizontal = horizontal;
-            this.vertical = vertical;
+        private OffsetIterator(int horizontalBound, int verticalBound) {
+            this.horizontalBound = horizontalBound;
+            this.verticalBound = verticalBound;
         }
 
         @Override
         public boolean hasNext() {
-            return horizontalIndex < horizontal.size();
+            return available;
         }
 
         @Override
         public Offset next() {
-            if (!hasNext()) throw new NoSuchElementException();
-            HorizontalOffset column = horizontal.get(horizontalIndex);
-            Offset result = new Offset(column.x, vertical.get(verticalIndex), column.z);
-            verticalIndex++;
-            if (verticalIndex == vertical.size()) {
-                verticalIndex = 0;
-                horizontalIndex++;
-            }
+            if (!available) throw new NoSuchElementException();
+            Offset result = new Offset(x, y, z);
+            advance();
             return result;
+        }
+
+        private void advance() {
+            if (radius == 0) {
+                if (verticalBound == 0) {
+                    available = false;
+                    return;
+                }
+                radius = 1;
+                initializeShell();
+                return;
+            }
+
+            int horizontalRadius = Math.min(radius, horizontalBound);
+            boolean fullZRange = Math.abs(x) == radius || Math.abs(y) == radius;
+            if (fullZRange && z < horizontalRadius) {
+                z++;
+                return;
+            }
+            if (!fullZRange && z == -radius) {
+                z = radius;
+                return;
+            }
+
+            if (radius > horizontalBound) {
+                if (y == -radius) {
+                    y = radius;
+                    z = -horizontalRadius;
+                    return;
+                }
+            } else if (y < radius) {
+                y++;
+                z = -horizontalRadius;
+                return;
+            }
+
+            if (x < horizontalRadius) {
+                x++;
+                y = -radius;
+                z = -horizontalRadius;
+                return;
+            }
+
+            radius++;
+            if (radius > verticalBound) {
+                available = false;
+                return;
+            }
+            initializeShell();
+        }
+
+        private void initializeShell() {
+            int horizontalRadius = Math.min(radius, horizontalBound);
+            x = -horizontalRadius;
+            y = -radius;
+            z = -horizontalRadius;
         }
     }
 }

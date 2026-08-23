@@ -3,7 +3,6 @@ package xyz.pyrehaven.omwh;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.level.portal.TeleportTransition;
 import net.minecraft.world.phys.Vec3;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -43,6 +42,9 @@ public final class TeleportService {
     }
     private record Snapshot<T>(UUID rootUuid, Map<UUID, T> entities, Map<UUID, UUID> parents,
                                Map<UUID, T> players, List<UUID> order) { }
+    record LifecycleFence<T>(T player, UUID playerUuid, Object sourceLevel, T root,
+                             boolean mounted, double rootWidth, double rootHeight,
+                             Snapshot<T> tree) { }
 
     private TeleportService() { }
 
@@ -54,10 +56,11 @@ public final class TeleportService {
         }
         Attempt<Entity> attempt = attempt(root, sourceLevel, destination.level(),
                 sourceLevel == destination.level(), ENTITY_TREE,
-                entity -> entity.teleport(new TeleportTransition(destination.level(), destination.position(),
-                        Vec3.ZERO, destination.yaw(), destination.pitch(), TeleportTransition.DO_NOTHING)),
-                entity -> entity.setDeltaMovement(Vec3.ZERO));
-        refreshTracking(attempt, ENTITY_TREE,
+                entity -> entity.teleport(destination.transition()),
+                entity -> {
+                    if (destination.clearVelocity()) entity.setDeltaMovement(Vec3.ZERO);
+                });
+        attempt = refreshTrackingSafely(attempt, ENTITY_TREE,
                 entity -> destination.level().getChunkSource().move((ServerPlayer) entity),
                 entity -> {
                     destination.level().getChunkSource().removeEntity(entity);
@@ -69,6 +72,56 @@ public final class TeleportService {
         return new Result(attempt.outcome(), passengers);
     }
 
+    static LifecycleFence<Entity> captureLifecycle(ServerPlayer player) {
+        Entity root = player.getRootVehicle();
+        return captureLifecycle(player, root, player.level(), root != player,
+                root.getBbWidth(), root.getBbHeight(), ENTITY_TREE);
+    }
+
+    static boolean isLifecycleCurrent(LifecycleFence<Entity> fence) {
+        ServerPlayer player = (ServerPlayer) fence.player();
+        Entity root = player.getRootVehicle();
+        return isLifecycleCurrent(fence, player, root, player.level(), root != player,
+                root.getBbWidth(), root.getBbHeight(), !player.hasDisconnected(), player.isAlive(), ENTITY_TREE);
+    }
+
+    static <T> LifecycleFence<T> captureLifecycle(T player, T root, Object sourceLevel,
+                                                   boolean mounted, double rootWidth, double rootHeight,
+                                                   EntityTree<T> tree) {
+        Snapshot<T> snapshot = snapshot(root, tree);
+        UUID playerUuid = requireUuid(tree.uuid(player));
+        if (snapshot.entities().get(playerUuid) != player) {
+            throw new IllegalStateException("command player is not in the captured passenger tree");
+        }
+        validateSourceTree(snapshot, sourceLevel, tree);
+        return new LifecycleFence<>(player, playerUuid, sourceLevel, root, mounted,
+                rootWidth, rootHeight, snapshot);
+    }
+
+    static <T> boolean isLifecycleCurrent(LifecycleFence<T> fence, T player, T root,
+                                          Object sourceLevel, boolean mounted,
+                                          double rootWidth, double rootHeight,
+                                          boolean connected, boolean alive, EntityTree<T> tree) {
+        if (!connected || !alive || player != fence.player() || root != fence.root()
+                || sourceLevel != fence.sourceLevel() || mounted != fence.mounted()
+                || Double.compare(rootWidth, fence.rootWidth()) != 0
+                || Double.compare(rootHeight, fence.rootHeight()) != 0
+                || !fence.playerUuid().equals(tree.uuid(player))) return false;
+        try {
+            Snapshot<T> current = snapshot(root, tree);
+            validateSourceTree(current, sourceLevel, tree);
+            if (!fence.tree().rootUuid().equals(current.rootUuid())
+                    || !fence.tree().parents().equals(current.parents())
+                    || !fence.tree().entities().keySet().equals(current.entities().keySet())) return false;
+            for (Map.Entry<UUID, T> entry : fence.tree().entities().entrySet()) {
+                if (current.entities().get(entry.getKey()) != entry.getValue()) return false;
+            }
+            return true;
+        } catch (RuntimeException invalid) {
+            return false;
+        }
+    }
+
     static <T> void refreshTracking(Attempt<T> attempt, EntityTree<T> tree,
                                     Consumer<T> movePlayer, Consumer<T> retrackEntity) {
         if (!attempt.success()) return;
@@ -77,6 +130,18 @@ public final class TeleportService {
         }
         for (T entity : attempt.entities()) {
             if (!tree.isPlayer(entity)) retrackEntity.accept(entity);
+        }
+    }
+
+    static <T> Attempt<T> refreshTrackingSafely(Attempt<T> attempt, EntityTree<T> tree,
+                                                Consumer<T> movePlayer, Consumer<T> retrackEntity) {
+        if (!attempt.success()) return attempt;
+        try {
+            refreshTracking(attempt, tree, movePlayer, retrackEntity);
+            return attempt;
+        } catch (RuntimeException failure) {
+            LOGGER.error("OMWH tracking refresh failed after teleport mutation", failure);
+            return new Attempt<>(Outcome.PARTIAL, attempt.entities());
         }
     }
 
@@ -92,12 +157,7 @@ public final class TeleportService {
         Snapshot<T> expected;
         try {
             expected = snapshot(root, tree);
-            for (T entity : expected.entities().values()) {
-                if (!tree.isServerSide(entity) || tree.isRemoved(entity) || tree.level(entity) != sourceLevel) {
-                    LOGGER.error("OMWH refused an invalid source passenger tree");
-                    return new Attempt<>(Outcome.FAILED, List.of());
-                }
-            }
+            validateSourceTree(expected, sourceLevel, tree);
         } catch (RuntimeException exception) {
             LOGGER.error("OMWH refused an invalid source passenger tree", exception);
             return new Attempt<>(Outcome.FAILED, List.of());
@@ -197,6 +257,14 @@ public final class TeleportService {
         }
         return new Snapshot<>(order.getFirst(), Map.copyOf(entities), Map.copyOf(parents),
                 Map.copyOf(players), List.copyOf(order));
+    }
+
+    private static <T> void validateSourceTree(Snapshot<T> snapshot, Object sourceLevel, EntityTree<T> tree) {
+        for (T entity : snapshot.entities().values()) {
+            if (!tree.isServerSide(entity) || tree.isRemoved(entity) || tree.level(entity) != sourceLevel) {
+                throw new IllegalStateException("invalid source passenger tree member");
+            }
+        }
     }
 
     private static UUID requireUuid(UUID uuid) {

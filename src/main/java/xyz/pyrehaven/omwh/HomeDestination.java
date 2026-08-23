@@ -65,13 +65,13 @@ public final class HomeDestination {
                     player, respawn.newLevel(), respawn.position()))) {
                 return new Result(Outcome.UNSAFE, null);
             }
-            return new Result(Outcome.ACCEPT, new DestinationSafety.Prepared(respawn.newLevel(),
-                    respawn.position(), respawn.yRot(), respawn.xRot()));
+            return new Result(Outcome.ACCEPT, DestinationSafety.Prepared.ordinary(
+                    respawn.newLevel(), respawn.position(), respawn.yRot(), respawn.xRot()));
         }
 
         if (force) {
-            return new Result(Outcome.ACCEPT, new DestinationSafety.Prepared(respawn.newLevel(),
-                    respawn.position(), root.getYRot(), root.getXRot()));
+            return new Result(Outcome.ACCEPT, DestinationSafety.Prepared.ordinary(
+                    respawn.newLevel(), respawn.position(), root.getYRot(), root.getXRot()));
         }
 
         BlockPos homeBlock = respawnConfig.respawnData().pos();
@@ -91,8 +91,8 @@ public final class HomeDestination {
             return new Result(Outcome.VEHICLE_TOO_LARGE, null);
         }
         Vec3 position = choice == MountedChoice.ABOVE_BED ? aboveBed : respawn.position();
-        return new Result(Outcome.ACCEPT, new DestinationSafety.Prepared(respawn.newLevel(),
-                position, root.getYRot(), root.getXRot()));
+        return new Result(Outcome.ACCEPT, DestinationSafety.Prepared.ordinary(
+                respawn.newLevel(), position, root.getYRot(), root.getXRot()));
     }
 
     private static boolean isCoveredBed(ServerLevel level, BlockPos homeBlock) {
