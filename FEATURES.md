@@ -155,11 +155,12 @@ The configuration path is not strict whole-document schema validation: unknown k
 - Destination discovery and the checks required by that command complete before teleport mutation begins.
 - No command catches an invariant violation and retries through another destination or mutation path.
 - Unexpected command exceptions are logged with context, send the command user an internal-error message, and return command failure.
-- Destination-safety denials use the configured unsafe-home or unsafe-spawn message. When
-  `enableForceOverride` is enabled, only these denials add a second line pointing to the configured
-  command name followed by `force`. Disabled force commands are never advertised. Vehicle-too-large,
-  missing-home, cross-dimension, disabled-spawn, unavailable-world, cooldown, mutation/internal,
-  partial, and success feedback do not include this guidance.
+- Destination-safety and vehicle-too-large denials use their configured messages. When
+  `enableForceOverride` is enabled, both outcomes add a second line pointing to the configured
+  command name followed by `force`; vehicle-too-large feedback also tells the player to dismount.
+  Disabled force commands are never advertised. Missing-home, cross-dimension, disabled-spawn,
+  unavailable-world, cooldown, mutation/internal, partial, and success feedback do not include this
+  guidance.
 - Teleport invariant failures with no returned moved root use the command-specific internal-error
   message. They do not begin the regular cooldown or notify passengers. Reconciliation failures after
   a non-null moved root use a distinct partial-teleport warning, notify trustworthy moved player
