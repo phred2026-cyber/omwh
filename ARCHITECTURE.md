@@ -1,6 +1,6 @@
 # OMWH Structure
 
-This tree describes the OMWH 1.2.0 release candidate. The version is selected, but publication still waits for connected runtime verification and Elijah's explicit release approval.
+This is the authoritative annotated ownership tree for OMWH 1.2.0. It shows where each source-controlled file belongs and which component owns each part of the mod.
 
 `/home` and `/spawn` differ only in destination policy. `Commands`, `Cooldowns`,
 `DestinationSafety`, and `TeleportService` are their shared owners for command flow, cooldown state,
@@ -55,11 +55,11 @@ omwh/
 ├── .github/workflows/ci.yml
 │   # Runs the canonical Gradle build and regression suites on pushes and pull requests.
 ├── ARCHITECTURE.md
-│   # This proposed file tree. Bug and verification checks compare code placement against it.
+│   # This authoritative ownership tree. Bug and verification checks compare code placement against it.
 ├── CONFIGURATION.md
 │   # Complete server-owner reference for config fields, defaults, messages, and file handling.
 ├── FEATURES.md
-│   # Accepted behavior contract preserved while the implementation is rebuilt.
+│   # Detailed technical behavior contract for the current implementation.
 ├── README.md
 │   # Installation, commands, concise configuration summary, and gameplay behavior.
 ├── CHANGELOG.md

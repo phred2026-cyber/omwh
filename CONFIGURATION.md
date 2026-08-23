@@ -40,7 +40,7 @@ JSON uses `\n` for a newline inside a message. A literal backslash in JSON must 
 | `joinCooldownSeconds` | integer | `30` | Cooldown after joining. `0` disables it. |
 | `playTeleportSound` | boolean | `true` | Plays the teleport sound before an accepted teleport mutation. |
 | `spawnTeleportParticles` | boolean | `true` | Spawns portal particles before an accepted teleport mutation. |
-| `enableForceOverride` | boolean | `true` | Registers `force` under both configured commands. Force skips destination safety only. |
+| `enableForceOverride` | boolean | `true` | Registers `force` under both configured commands. Force skips destination safety and vehicle-size checks only. |
 | `enableCrossDimensionTeleport` | boolean | `true` | Allows valid cross-dimension homes and eligible fallback routing to Overworld spawn. |
 | `enableOverworldSpawn` | boolean | `true` | Allows Overworld spawn as a current or selected destination. |
 | `enableNetherSpawn` | boolean | `false` | Allows `/spawn` to use a Nether destination while the player is in the Nether. |
@@ -55,7 +55,7 @@ In the Overworld, disabling `enableOverworldSpawn` denies `/spawn`. In the Nethe
 
 `enableCrossDimensionTeleport` also controls whether `/home` may use a valid saved respawn point in another dimension. It does not make a missing home valid.
 
-Force is available to every player who can use the parent command when `enableForceOverride` is enabled. It bypasses destination safety and vehicle-size checks only. It does not bypass cooldowns, missing homes, dimension routing, unavailable worlds, command-source checks, or teleport failures.
+Force is available to every player who can use the parent command when `enableForceOverride` is enabled. It bypasses destination safety and vehicle-size checks only. It does not bypass cooldowns, missing homes, dimension routing, unavailable worlds, command-source checks, or teleport failures. OMWH has no permission nodes, so base commands are available to all player sources and force can only be toggled globally, not permissioned separately.
 
 ## Messages
 

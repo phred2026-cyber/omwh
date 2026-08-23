@@ -1,21 +1,20 @@
 # OMWH Feature Contract
 
-## Status
-
-This file is the accepted gameplay contract for the OMWH 1.2.0 release candidate. The version is selected for local test-server deployment, but official publication still waits for connected runtime verification and Elijah's explicit approval. The eight production owners and four grouped regression files are defined in `ARCHITECTURE.md`.
+This file is the detailed gameplay and server-behavior contract for OMWH 1.2.0. The eight production owners and four grouped regression files are defined in `ARCHITECTURE.md`.
 
 ## Runtime scope
 
 - OMWH is server-authoritative. It must work on dedicated Fabric servers and integrated singleplayer servers.
 - Players do not need OMWH on their clients. There is no client-only gameplay owner or client entrypoint.
 - Both commands are player commands. Non-player command sources cannot invoke teleport behavior.
-- Server owners decide whether valid `/home` destinations and eligible `/spawn` routes may cross dimensions.
+- Cross-dimension `/home` is enabled by default. Server owners can disable it, and separately control which `/spawn` destinations are available.
+- OMWH has no permission nodes. All player sources can use the configured base commands, and every player who can use a base command can use its `force` child while force is enabled. Force can be toggled globally but cannot be permissioned separately.
 
 ## `/home`
 
 - The configured home command defaults to `/home`.
 - `/home force` uses the same authoritative vanilla respawn position while deliberately bypassing
-  destination-safety checks. It remains subject to player-source, cooldown, missing-home, and
+  destination-safety and vehicle-size checks. It remains subject to player-source, cooldown, missing-home, and
   dimension-admission rules, and exists only while `enableForceOverride` is enabled. Every player
   who can use `/home` can use this child command.
 - A home exists only when Minecraft has a valid configured respawn point for the player: a bed, a charged respawn anchor, or a forced respawn point.
@@ -49,8 +48,8 @@ This file is the accepted gameplay contract for the OMWH 1.2.0 release candidate
 ## Shared destination safety
 
 `DestinationSafety` owns the safety primitives used by both destination policies. Normal command
-forms apply their destination policies; the literal `force` children deliberately skip those safety
-checks and no other admission rule.
+forms apply their destination policies; the literal `force` children deliberately skip destination
+safety and vehicle-size checks, but no other admission rule.
 
 - Unmounted `/home` additionally rejects fluids and hazards in the translated player space or its
   supporting layer, even when Minecraft supplied the respawn position.
@@ -150,7 +149,7 @@ The configuration path is not strict whole-document schema validation: unknown k
 ## Failure contract
 
 - Expected denials use the most specific player-facing message and return command failure without teleport mutation.
-- Force bypasses destination safety only. It does not bypass command-source, cooldown, missing-home,
+- Force bypasses destination safety and vehicle-size checks only. It does not bypass command-source, cooldown, missing-home,
   cross-dimension admission, disabled spawn settings, destination-world, or teleport-mutation failure handling.
 - Destination discovery and the checks required by that command complete before teleport mutation begins.
 - No command catches an invariant violation and retries through another destination or mutation path.

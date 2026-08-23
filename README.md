@@ -1,57 +1,49 @@
 # OMWH
 
-OMWH is a Minecraft server mod that adds `/home` and `/spawn` commands without creating permanent warp points.
+OMWH is a Minecraft server mod that adds `/home` and `/spawn` without creating permanent warp points.
 
-There is no `/sethome` command. `/home` takes you wherever your Minecraft respawn is set, whether that is a bed or a respawn anchor. `/spawn` brings you to world spawn.
+There is no `/sethome` command. `/home` uses the respawn point Minecraft already stores for you, such as a bed or charged respawn anchor. `/spawn` brings you to the spawn destination selected for your current dimension.
 
-You can even bring friends with you when you use an OMWH command. If you are riding a vehicle or mount, such as a boat, minecart, or horse, it travels with you. Any other entities or players riding it come along too.
-
-OMWH also has configurable cooldowns for normal command use, damage, PvP, and joining the server.
+OMWH can bring your vehicle, mount, friends, and other passengers along. It also has configurable cooldowns for normal command use, damage, PvP, and joining the server.
 
 ## Commands
 
 ### `/home`
 
-`/home` uses the respawn point Minecraft already stores for you. It does not create a separate home or add a `/sethome` command.
+`/home` returns you to your valid Minecraft respawn point. Missing, destroyed, blocked, or unsafe homes are refused instead of sending you somewhere else.
 
-A valid home can be:
-
-- A bed
-- A charged respawn anchor
-- A respawn point set by another server system
-
-Server owners can allow valid homes in other dimensions. Missing, destroyed, blocked, or unsafe homes are refused instead of sending the player somewhere else.
+Cross-dimension homes are enabled by default. Server owners can disable them with `enableCrossDimensionTeleport`.
 
 ### `/spawn`
 
-`/spawn` takes you to the spawn destination selected for your current world. Server owners can control Overworld, Nether, End, and modded-dimension spawn travel separately.
+`/spawn` uses the destination allowed for the player's current dimension. Overworld spawn is enabled by default; Nether, End, and modded-dimension spawn destinations are disabled by default. A disabled dimension may fall back to Overworld spawn only when both cross-dimension teleporting and Overworld spawn are enabled.
 
-Outside the End, OMWH checks already-loaded positions in expanding hollow 3D cubes around spawn, up to 48 blocks on every axis, for solid ground and enough clear space for the player or mounted vehicle. Each new cube checks only its outer surface; previously checked interior positions aren't repeated. Admission, mounted-group validation, search, final safety checks, and completion share one server-wide allowance for OMWH's bounded block, collision, passenger, effect, and bookkeeping operations. If synchronous admission would exceed the current tick's allowance, OMWH asks the player to try again; longer searches resume across ticks. OMWH also cancels a pending result if the player or mounted group changes before it completes. Normal mounted safety checks support roots up to 14 blocks wide with 16 blocks of clear height; larger modded vehicles are reported as too large before OMWH scans their full bounds. Nether spawn uses Minecraft's normal Overworld-to-Nether coordinate scaling and world-border limits. In the End, Minecraft recreates and chooses the normal portal arrival platform, then OMWH checks that exact destination for environmental danger and enough room without searching elsewhere.
+Nether destinations use Minecraft's normal coordinate scaling. End destinations use the vanilla End arrival platform. For normal Overworld, Nether, and modded-dimension travel, OMWH searches already-loaded chunks within 48 blocks of the spawn anchor on each axis. It never loads or generates terrain, so `/spawn` may refuse if the relevant chunks are not loaded. Pregeneration alone is not enough once Minecraft unloads them.
 
-### Bringing vehicles and friends
+### Vehicles and friends
 
-When you use `/home` or `/spawn` while mounted, OMWH moves the vehicle or mount and everyone riding it. This includes boats, minecarts, horses, other mounted entities, and player passengers.
+Use `/home` or `/spawn` while mounted and OMWH moves the root vehicle or mount with its full passenger group. This includes boats, minecarts, horses, other mounted entities, and player passengers.
 
-The whole group stays attached during the teleport. Passenger trees are limited to 64 entities so validation and completion remain bounded; OMWH stops consuming the tree as soon as a 65th member is found, and larger groups are refused before movement with a clear message. If the destination does not have enough room, OMWH refuses the teleport rather than separating the riders or placing the vehicle inside blocks.
+Passenger groups are limited to 64 entities. If the destination cannot fit the vehicle, OMWH refuses the teleport rather than separating riders or placing the group inside blocks.
 
 ### Force commands
 
-Server owners can enable `/home force` and `/spawn force`. Any player who can use `/home` or `/spawn` can use its force form. Force skips only the destination safety check; cooldowns, missing homes, dimension routing, disabled spawn destinations, unavailable worlds, and teleport failures still apply.
+`/home force` and `/spawn force` are enabled by default. Any player who can use the parent command can use its force form.
 
-When a normal command refuses an unsafe destination, OMWH shows the configured unsafe message. If force is enabled, it also tells the player which configured command to use with `force`.
+Force skips only destination safety and vehicle-size checks. Cooldowns, missing homes, dimension routing, disabled spawn destinations, unavailable worlds, and teleport failures still apply. Server owners can turn force off globally, but OMWH has no permission nodes and cannot restrict force separately from the parent command.
 
 ## Cooldowns
 
 Server owners can configure:
 
-- A regular cooldown after a successful `/home` or `/spawn`
-- A PvP cooldown after combat with another player
-- A damage cooldown after other incoming damage
+- A regular cooldown after a successful or possibly partial teleport
+- A PvP cooldown after OMWH allows incoming damage from another player
+- A damage cooldown after OMWH allows other incoming damage, including self-damage
 - A join cooldown after connecting to the server
 
-Cooldowns can be changed or disabled in `config/omwh.json`.
+When cooldowns overlap, the longer event restriction wins. Cooldown state is kept in memory and clears when a player disconnects, so reconnecting also clears a PvP cooldown and replaces it with the configured join cooldown.
 
-Damage cooldowns start when OMWH allows an incoming damage event. Another mod can still cancel that damage afterward.
+OMWH records damage cooldowns when its damage callback allows the incoming event. Another mod can still cancel that damage afterward.
 
 ## Installation
 
@@ -60,34 +52,24 @@ Damage cooldowns start when OMWH allows an incoming damage event. Another mod ca
 3. Remove any older OMWH jar from the server's `mods` folder, then put the new jar there. Keeping both versions causes Fabric Loader to stop on a duplicate mod ID.
 4. Start the server once to create `config/omwh.json`.
 
-Players do not need to install OMWH on their clients. OMWH also works in singleplayer. Immediate accepted teleports prepare a fixed area of 25 destination chunks. That caps how many chunks OMWH requests; Minecraft's terrain-generation time is not a fixed-duration operation.
+Players do not need OMWH on their clients. OMWH also works in singleplayer.
 
 ## Configuration
 
-Edit `config/omwh.json` after the first launch, then restart the server. OMWH does not reload configuration while the server is running. See [CONFIGURATION.md](CONFIGURATION.md) for the complete field, message, placeholder, color-code, and validation reference.
+Edit `config/omwh.json`, then restart the server. OMWH reads configuration only during startup and has no reload command.
 
-| Field | Default | Purpose |
-|---|---:|---|
-| `homeCommand` | `"home"` | Name of the home command |
-| `spawnCommand` | `"spawn"` | Name of the spawn command |
-| `enableRegularCooldown` | `true` | Enable the cooldown after a successful teleport |
-| `regularCooldownSeconds` | `30` | Cooldown between successful command uses |
-| `enablePvpCooldown` | `true` | Enable the PvP cooldown |
-| `pvpCooldownSeconds` | `45` | Cooldown after incoming PvP damage |
-| `enableDamageCooldown` | `true` | Enable the non-player damage cooldown |
-| `damageCooldownSeconds` | `10` | Cooldown after other incoming damage |
-| `joinCooldownSeconds` | `30` | Cooldown after joining the server |
-| `playTeleportSound` | `true` | Play the teleport sound |
-| `spawnTeleportParticles` | `true` | Show teleport particles |
-| `enableForceOverride` | `true` | Enable `/home force` and `/spawn force` for players who can use the parent commands |
-| `enableCrossDimensionTeleport` | `true` | Allow valid cross-dimension homes and eligible spawn travel |
-| `enableOverworldSpawn` | `true` | Allow the Overworld spawn destination |
-| `enableNetherSpawn` | `false` | Allow the Nether spawn destination |
-| `enableEndSpawn` | `false` | Allow the End spawn destination |
-| `enableModdedDimensionSpawn` | `false` | Allow `/spawn` to stay in the current modded dimension |
-| Message fields | See [CONFIGURATION.md](CONFIGURATION.md) | Every player-facing command outcome, including success, safety, passenger, partial, and internal-error feedback |
+Existing files are not rewritten when new settings are added. Omitted fields use their built-in defaults. Known fields must use the documented JSON type and valid values; invalid known settings or malformed JSON stop startup rather than being silently replaced.
 
-Set a cooldown duration to `0` to disable it. Existing configuration files can omit newer fields; OMWH uses the default value for anything missing. This means omitted Nether, End, and modded-dimension spawn settings are disabled. Unknown fields are ignored. Known settings must use the documented JSON type, and invalid command names, negative cooldowns, malformed JSON, or other invalid known values stop startup with a clear configuration error instead of being silently ignored.
+See [CONFIGURATION.md](CONFIGURATION.md) for all settings, defaults, messages, color codes, placeholders, and validation rules. Detailed command and search behavior is documented in [FEATURES.md](FEATURES.md).
+
+## Server owners should know
+
+- OMWH has no permission nodes. All player sources can use the configured base commands.
+- Force is enabled for those players by default and can only be toggled globally.
+- Cross-dimension `/home` is enabled by default.
+- Nether, End, and modded-dimension spawn destinations are disabled by default.
+- Cooldowns and pending searches clear when a player disconnects.
+- Normal `/spawn` searches loaded chunks only within 48 blocks of its anchor and may refuse when the relevant spawn chunks are not loaded.
 
 ## Links
 
