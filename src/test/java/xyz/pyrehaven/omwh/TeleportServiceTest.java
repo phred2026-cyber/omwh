@@ -18,8 +18,10 @@ public final class TeleportServiceTest {
         trackingRefreshRunsOncePerReconciledEntityAndNeverOnFailure();
         trackingRefreshExceptionsBecomePartialWithoutAnotherMutation();
         pendingLifecycleFenceRejectsEveryPlanningIdentityChange();
+        passengerTreeCapacityIsExactAndWideFanoutRejectsEarly();
+        lifecycleValidationDistinguishesOversizeFromOrdinaryStaleState();
         reconciledPlayerNotificationsExcludeTheCommandPlayer();
-        System.out.println("TeleportServiceTest PASS (9 behavior groups)");
+        System.out.println("TeleportServiceTest PASS (11 behavior groups)");
     }
 
     private static void sameDimensionUsesOneRootMutationAndPreservesEveryIdentity() {
@@ -268,6 +270,66 @@ public final class TeleportServiceTest {
                         true, 2.0, 1.5, true, true, NODE_TREE), "passenger UUID/edge change rejected");
     }
 
+    private static void passengerTreeCapacityIsExactAndWideFanoutRejectsEarly() {
+        Object level = new Object();
+        Node root = Node.entity("root", level);
+        Node cursor = root;
+        for (int node = 1; node < TeleportService.MAX_PASSENGER_TREE_NODES - 1; node++) {
+            cursor = cursor.add(Node.entity("entity-" + node, level));
+        }
+        Node player = cursor.add(Node.player("player", level));
+        TeleportService.captureLifecycle(player, root, level, true, 1.0, 1.0, NODE_TREE);
+
+        cursor.add(Node.entity("entity-over-cap", level));
+        boolean rejected = false;
+        try {
+            TeleportService.captureLifecycle(player, root, level, true, 1.0, 1.0, NODE_TREE);
+        } catch (TeleportService.PassengerTreeTooLarge expected) {
+            rejected = true;
+        }
+        check(rejected, "exactly 65 entities reject while exactly 64 are accepted");
+
+        Node wideRoot = Node.entity("wide-root", level);
+        Node widePlayer = wideRoot.add(Node.player("wide-player", level));
+        for (int child = 1; child < 20_000; child++) {
+            wideRoot.add(Node.entity("wide-" + child, level));
+        }
+        AtomicInteger childReads = new AtomicInteger();
+        TeleportService.EntityTree<Node> counted = new CountingChildrenTree(wideRoot, childReads);
+        rejected = false;
+        try {
+            TeleportService.captureLifecycle(widePlayer, wideRoot, level, true, 1.0, 1.0, counted);
+        } catch (TeleportService.PassengerTreeTooLarge expected) {
+            rejected = true;
+        }
+        check(rejected, "very-wide direct passenger fanout rejects");
+        check(childReads.get() <= TeleportService.MAX_PASSENGER_TREE_NODES,
+                "wide fanout consumes no children beyond the remaining capacity");
+    }
+
+    private static void lifecycleValidationDistinguishesOversizeFromOrdinaryStaleState() {
+        Object level = new Object();
+        Node root = Node.entity("root", level);
+        Node player = root.add(Node.player("player", level));
+        TeleportService.LifecycleFence<Node> fence = TeleportService.captureLifecycle(
+                player, root, level, true, 1.0, 1.0, NODE_TREE);
+        check(TeleportService.lifecycleStatus(fence, player, root, level,
+                        true, 1.0, 1.0, true, true, NODE_TREE)
+                        == TeleportService.LifecycleStatus.CURRENT,
+                "unchanged lifecycle is current");
+        check(TeleportService.lifecycleStatus(fence, player, root, new Object(),
+                        true, 1.0, 1.0, true, true, NODE_TREE)
+                        == TeleportService.LifecycleStatus.STALE,
+                "ordinary lifecycle drift is stale");
+        for (int child = 1; child < TeleportService.MAX_PASSENGER_TREE_NODES; child++) {
+            root.add(Node.entity("growth-" + child, level));
+        }
+        check(TeleportService.lifecycleStatus(fence, player, root, level,
+                        true, 1.0, 1.0, true, true, NODE_TREE)
+                        == TeleportService.LifecycleStatus.TOO_LARGE,
+                "pending passenger growth beyond capacity is a distinct lifecycle outcome");
+    }
+
     private static void rejectBeforeMutation(Node root, Object source, Object destination, String behavior) {
         AtomicInteger teleports = new AtomicInteger();
         TeleportService.Attempt<Node> attempt = attempt(root, source, destination, false, node -> {
@@ -426,5 +488,33 @@ public final class TeleportServiceTest {
         public Object level(Node node) {
             return node.level;
         }
+    }
+
+    private static final class CountingChildrenTree implements TeleportService.EntityTree<Node> {
+        private final Node countedParent;
+        private final AtomicInteger childReads;
+        private final NodeTree delegate = new NodeTree();
+
+        private CountingChildrenTree(Node countedParent, AtomicInteger childReads) {
+            this.countedParent = countedParent;
+            this.childReads = childReads;
+        }
+
+        @Override public UUID uuid(Node node) { return delegate.uuid(node); }
+        @Override public List<Node> children(Node node) {
+            if (node != countedParent) return delegate.children(node);
+            return new java.util.AbstractList<>() {
+                @Override public Node get(int index) {
+                    childReads.incrementAndGet();
+                    return countedParent.children.get(index);
+                }
+                @Override public int size() { return countedParent.children.size(); }
+            };
+        }
+        @Override public Node parent(Node node) { return delegate.parent(node); }
+        @Override public boolean isPlayer(Node node) { return delegate.isPlayer(node); }
+        @Override public boolean isServerSide(Node node) { return delegate.isServerSide(node); }
+        @Override public boolean isRemoved(Node node) { return delegate.isRemoved(node); }
+        @Override public Object level(Node node) { return delegate.level(node); }
     }
 }

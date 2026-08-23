@@ -13,6 +13,7 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Predicate;
 
 public final class DestinationsTest {
     public static void main(String[] args) {
@@ -27,6 +28,8 @@ public final class DestinationsTest {
         mountedHazardsDoNotMasqueradeAsVehicleClearanceFailures();
         preparedDestinationPreservesAuthoritativeTransition();
         endPortalSafetyChecksOnlyTheRegeneratedPlatformDestination();
+        immediateGeometryLimitsRejectBeforeHomeAndEndSafetyScans();
+        immediateWorkBoundsAreDerivedFromEnforcedGeometry();
         spawnSearchIsLazyDeterministicAndComplete();
         zeroBoundsEmitOnlyTheOrigin();
         incrementalSearchResumesWithinFixedTickBudgets();
@@ -43,7 +46,7 @@ public final class DestinationsTest {
         spawnFailureDistinguishesOversizedVehicle();
         collisionOwnersIncludeShellAndEveryInvolvedChunk();
         safetyOwnsFootprintsHazardsAndFiveByFiveChunkPreparation();
-        System.out.println("DestinationsTest PASS (25 behavior groups)");
+        System.out.println("DestinationsTest PASS (27 behavior groups)");
     }
 
     private static void homePolicyAllowsOnlyAcceptedRespawnsAndOneBedAlternate() {
@@ -235,6 +238,58 @@ public final class DestinationsTest {
                 "force accepts the vanilla End transition without placement checks");
         check(rootChecks.get() == 0 && playerChecks.get() == 0,
                 "forced End spawn performs no safety or size checks");
+    }
+
+    private static void immediateGeometryLimitsRejectBeforeHomeAndEndSafetyScans() {
+        AtomicInteger homeScans = new AtomicInteger();
+        check(HomeDestination.mountedGeometryOutcome(14, 16, () -> {
+                    homeScans.incrementAndGet();
+                    return DestinationSafety.HomeFit.FITS;
+                }) == HomeDestination.Outcome.ACCEPT,
+                "largest supported mounted home geometry reaches its safety scan");
+        check(homeScans.get() == 1, "supported mounted home scans exactly once through the seam");
+        check(HomeDestination.mountedGeometryOutcome(15, 16, () -> {
+                    homeScans.incrementAndGet();
+                    return DestinationSafety.HomeFit.FITS;
+                }) == HomeDestination.Outcome.VEHICLE_TOO_LARGE,
+                "too-wide mounted home is rejected");
+        check(homeScans.get() == 1, "too-wide mounted home rejects before world safety work");
+
+        AtomicInteger endScans = new AtomicInteger();
+        check(SpawnDestination.acceptEnd(false, 14, 16,
+                        () -> { endScans.incrementAndGet(); return true; }, null)
+                        == SpawnDestination.Outcome.ACCEPT,
+                "largest supported End root reaches exact-platform safety");
+        check(SpawnDestination.acceptEnd(false, 14, 17,
+                        () -> { endScans.incrementAndGet(); return true; }, () -> false)
+                        == SpawnDestination.Outcome.VEHICLE_TOO_LARGE,
+                "too-tall End root is rejected as an unsupported vehicle");
+        check(endScans.get() == 1, "oversized End root rejects before root or player safety scans");
+        check(SpawnDestination.acceptEnd(true, 100, 100,
+                        () -> { throw new AssertionError("force must skip root safety"); }, null)
+                        == SpawnDestination.Outcome.ACCEPT,
+                "force still bypasses destination geometry and safety");
+    }
+
+    private static void immediateWorkBoundsAreDerivedFromEnforcedGeometry() {
+        check(DestinationSafety.MAX_SUPPORTED_ROOT_WIDTH == 14
+                        && DestinationSafety.MAX_SUPPORTED_CLEAR_HEIGHT == 16,
+                "all normal routes share the accepted 14x16 root contract");
+        check(DestinationSafety.MAX_SINGLE_MOUNTED_HOME_SAFETY_WORK == 59_015
+                        && DestinationSafety.MAX_MOUNTED_HOME_SAFETY_WORK == 118_050,
+                "mounted home bound independently includes cached bed reads, hazards, and collision work");
+        check(DestinationSafety.MAX_SINGLE_END_SAFETY_WORK == 49_626
+                        && DestinationSafety.MAX_PLAYER_END_SAFETY_WORK == 772
+                        && DestinationSafety.MAX_END_SAFETY_WORK == 50_398,
+                "End bound independently includes support collision-shape checks and player diagnostics");
+        check(DestinationSafety.MAX_SPAWN_CANDIDATE_WORK == 46_372,
+                "spawn candidate bound independently includes support collision-shape checks");
+        check(Commands.MAX_IMMEDIATE_ROUTE_WORK == 120_096
+                        && Commands.SEARCH_WORLD_WORK_PER_TICK == 120_671,
+                "immediate and aggregate reservations match independently calculated maxima");
+        check(DestinationSafety.destinationChunks(0, 0).size()
+                        == DestinationSafety.DESTINATION_CHUNK_CAP,
+                "immediate preparation is explicitly capped at 25 chunks");
     }
 
     private static void spawnSearchIsLazyDeterministicAndComplete() {
@@ -432,8 +487,9 @@ public final class DestinationsTest {
         check(SpawnDestination.CandidateProbe.class.isAssignableFrom(DestinationSafety.SpawnProbe.class),
                 "production DestinationSafety probe is wired into the incremental search contract");
         check(Commands.SEARCH_CANDIDATES_PER_TICK == 4_096
-                        && Commands.SEARCH_WORLD_WORK_PER_TICK == 4_096,
-                "production command flow uses explicit fixed per-tick candidate and world-work ceilings");
+                        && Commands.SEARCH_WORLD_WORK_PER_TICK
+                        == TeleportService.LIFECYCLE_CAPTURE_WORK + Commands.MAX_IMMEDIATE_ROUTE_WORK,
+                "candidate starts retain a fixed ceiling while world-work follows the enforced maximum route");
         AtomicInteger directRangeChecks = new AtomicInteger();
         SpawnDestination.CandidateProbe probe = new SpawnDestination.CandidateProbe() {
             @Override public void begin(SpawnDestination.Offset offset, SpawnDestination.ProbeKind kind) {
@@ -496,20 +552,20 @@ public final class DestinationsTest {
 
     private static void spawnSearchUsesOneBoundedLoadedChunkPass() {
         List<String> probes = new ArrayList<>();
-        SpawnDestination.Selection selection = SpawnDestination.select(
+        SpawnDestination.Selection selection = searchSelection(
                 List.of(new SpawnDestination.Offset(0, 0, 0), new SpawnDestination.Offset(1, 0, 0)),
                 offset -> { probes.add("root:" + offset.x()); return false; },
                 offset -> { probes.add("player:" + offset.x()); return offset.x() == 0; });
         check(selection.outcome() == SpawnDestination.Outcome.VEHICLE_TOO_LARGE,
                 "bounded pass retains mounted diagnostic");
         check(selection.candidatesVisited() == 2 && selection.rootChecks() == 2
-                        && selection.playerChecks() == 2,
-                "structural counters prove one diagnostic per bounded candidate");
-        check(probes.equals(List.of("root:0", "player:0", "root:1", "player:1")),
-                "root and player diagnostics share one nearest-first pass");
+                        && selection.playerChecks() == 1,
+                "production Search retains a successful player diagnostic without repeating it");
+        check(probes.equals(List.of("root:0", "player:0", "root:1")),
+                "root and player diagnostics share the production nearest-first pass");
 
         long started = System.nanoTime();
-        SpawnDestination.Selection exhausted = SpawnDestination.select(
+        SpawnDestination.Selection exhausted = searchSelection(
                 SpawnDestination.offsets(48, 48), offset -> false, offset -> false);
         long elapsedNanos = System.nanoTime() - started;
         check(exhausted.outcome() == SpawnDestination.Outcome.UNSAFE
@@ -580,7 +636,7 @@ public final class DestinationsTest {
     private static void spawnFailureDistinguishesOversizedVehicle() {
         AtomicInteger rootChecks = new AtomicInteger();
         AtomicInteger playerChecks = new AtomicInteger();
-        SpawnDestination.Selection accepted = SpawnDestination.select(
+        SpawnDestination.Selection accepted = searchSelection(
                 List.of(new SpawnDestination.Offset(0, 0, 0), new SpawnDestination.Offset(1, 0, 0)),
                 offset -> rootChecks.incrementAndGet() == 1,
                 offset -> { playerChecks.incrementAndGet(); return true; });
@@ -589,13 +645,13 @@ public final class DestinationsTest {
 
         rootChecks.set(0);
         playerChecks.set(0);
-        SpawnDestination.Selection oversized = SpawnDestination.select(
+        SpawnDestination.Selection oversized = searchSelection(
                 List.of(new SpawnDestination.Offset(0, 0, 0)),
                 offset -> { rootChecks.incrementAndGet(); return false; },
                 offset -> { playerChecks.incrementAndGet(); return true; });
         check(oversized.outcome() == SpawnDestination.Outcome.VEHICLE_TOO_LARGE, "vehicle-specific denial");
         check(rootChecks.get() == 1 && playerChecks.get() == 1, "player probing follows root exhaustion");
-        SpawnDestination.Selection unsafe = SpawnDestination.select(
+        SpawnDestination.Selection unsafe = searchSelection(
                 List.of(new SpawnDestination.Offset(0, 0, 0)), offset -> false, offset -> false);
         check(unsafe.outcome() == SpawnDestination.Outcome.UNSAFE, "ordinary unsafe denial");
     }
@@ -657,6 +713,32 @@ public final class DestinationsTest {
         List<SpawnDestination.Offset> result = new ArrayList<>();
         offsets.forEach(result::add);
         return result;
+    }
+
+    private static SpawnDestination.Selection searchSelection(
+            Iterable<SpawnDestination.Offset> candidates,
+            Predicate<SpawnDestination.Offset> rootFits,
+            Predicate<SpawnDestination.Offset> playerFits) {
+        SpawnDestination.CandidateProbe probe = new SpawnDestination.CandidateProbe() {
+            private SpawnDestination.Offset active;
+            private SpawnDestination.ProbeKind kind;
+
+            @Override public void begin(SpawnDestination.Offset offset, SpawnDestination.ProbeKind probeKind) {
+                active = offset;
+                kind = probeKind;
+            }
+
+            @Override public SpawnDestination.ProbeStep step(int availableWorldWork) {
+                boolean fits = kind == SpawnDestination.ProbeKind.ROOT
+                        ? rootFits.test(active) : playerFits.test(active);
+                return new SpawnDestination.ProbeStep(fits
+                        ? SpawnDestination.ProbeOutcome.FITS : SpawnDestination.ProbeOutcome.REJECTED, 0);
+            }
+        };
+        SpawnDestination.Search search = new SpawnDestination.Search(
+                candidates.iterator(), probe, playerFits != null);
+        while (!search.complete()) search.tick(4_096, 4_096);
+        return search.selection();
     }
 
     private static List<SpawnDestination.Offset> referenceOffsets(int horizontalBound, int verticalBound) {

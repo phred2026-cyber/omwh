@@ -31,11 +31,60 @@ import java.util.function.LongPredicate;
 public final class DestinationSafety {
     static final double HOME_HORIZONTAL_MARGIN = 0.5;
     static final double HOME_UPPER_MARGIN = 1.5;
+    static final int MAX_SUPPORTED_ROOT_WIDTH = 14;
+    static final int MAX_SUPPORTED_CLEAR_HEIGHT = 16;
+    static final int DESTINATION_CHUNK_CAP = 5 * 5;
+    private static final int BLOCK_READ_WORK = 1;
+    private static final int COLLISION_INTERSECTION_WORK = 8;
+    private static final int MAX_ROOT_BLOCK_WIDTH = MAX_SUPPORTED_ROOT_WIDTH + 1;
+    private static final int MAX_ROOT_BLOCK_HEIGHT = MAX_SUPPORTED_CLEAR_HEIGHT - 1;
+    private static final int MAX_HOME_CLEARANCE_WIDTH = MAX_ROOT_BLOCK_WIDTH + 1;
+    private static final int MAX_HOME_CLEARANCE_HEIGHT = MAX_ROOT_BLOCK_HEIGHT + 2;
+    private static final int MAX_HOME_COLLISION_OWNER_WIDTH = MAX_HOME_CLEARANCE_WIDTH + 2;
+    private static final int MAX_HOME_COLLISION_OWNER_HEIGHT = MAX_HOME_CLEARANCE_HEIGHT + 2;
+    private static final int MAX_HOME_HAZARD_CELLS = MAX_ROOT_BLOCK_WIDTH
+            * (MAX_ROOT_BLOCK_HEIGHT + 1) * MAX_ROOT_BLOCK_WIDTH;
+    private static final int MAX_HOME_COLLISION_CELLS = MAX_HOME_COLLISION_OWNER_WIDTH
+            * MAX_HOME_COLLISION_OWNER_HEIGHT * MAX_HOME_COLLISION_OWNER_WIDTH;
+    private static final int MAX_HOME_CHUNK_PROBES = 3 * 3;
+    private static final int CONFIGURED_BED_READS = 2;
+    static final int MAX_SINGLE_MOUNTED_HOME_SAFETY_WORK = MAX_HOME_CHUNK_PROBES
+            + CONFIGURED_BED_READS * BLOCK_READ_WORK
+            + MAX_HOME_HAZARD_CELLS * BLOCK_READ_WORK
+            + MAX_HOME_COLLISION_CELLS * (BLOCK_READ_WORK + COLLISION_INTERSECTION_WORK);
+    static final int HOME_POLICY_WORK = 4 * BLOCK_READ_WORK + 2 * COLLISION_INTERSECTION_WORK;
+    static final int MAX_MOUNTED_HOME_SAFETY_WORK = 2 * MAX_SINGLE_MOUNTED_HOME_SAFETY_WORK
+            + HOME_POLICY_WORK;
+    private static final int MAX_END_COLLISION_OWNER_WIDTH = MAX_ROOT_BLOCK_WIDTH + 2;
+    private static final int MAX_END_COLLISION_OWNER_HEIGHT = MAX_ROOT_BLOCK_HEIGHT + 2;
+    private static final int MAX_END_OCCUPIED_CELLS = MAX_ROOT_BLOCK_WIDTH
+            * MAX_ROOT_BLOCK_HEIGHT * MAX_ROOT_BLOCK_WIDTH;
+    private static final int MAX_END_COLLISION_CELLS = MAX_END_COLLISION_OWNER_WIDTH
+            * MAX_END_COLLISION_OWNER_HEIGHT * MAX_END_COLLISION_OWNER_WIDTH;
+    private static final int MAX_END_SUPPORT_CELLS = MAX_ROOT_BLOCK_WIDTH * MAX_ROOT_BLOCK_WIDTH;
+    private static final int MAX_END_CHUNK_PROBES = 3 * 3;
+    static final int MAX_SINGLE_END_SAFETY_WORK = MAX_END_CHUNK_PROBES
+            + MAX_END_COLLISION_CELLS * (BLOCK_READ_WORK + COLLISION_INTERSECTION_WORK)
+            + MAX_END_OCCUPIED_CELLS * BLOCK_READ_WORK
+            + MAX_END_SUPPORT_CELLS * (BLOCK_READ_WORK + COLLISION_INTERSECTION_WORK);
+    static final int MAX_PLAYER_END_SAFETY_WORK = 4 + 80 * (BLOCK_READ_WORK + COLLISION_INTERSECTION_WORK)
+            + 12 * BLOCK_READ_WORK + 4 * (BLOCK_READ_WORK + COLLISION_INTERSECTION_WORK);
+    static final int MAX_END_SAFETY_WORK = MAX_SINGLE_END_SAFETY_WORK + MAX_PLAYER_END_SAFETY_WORK;
+    private static final int MAX_SPAWN_SUPPORT_CELLS = MAX_SUPPORTED_ROOT_WIDTH * MAX_SUPPORTED_ROOT_WIDTH;
+    private static final int MAX_SPAWN_OCCUPIED_CELLS = MAX_SUPPORTED_ROOT_WIDTH
+            * MAX_SUPPORTED_CLEAR_HEIGHT * MAX_SUPPORTED_ROOT_WIDTH;
+    private static final int MAX_SPAWN_COLLISION_CELLS = (MAX_SUPPORTED_ROOT_WIDTH + 2)
+            * (MAX_SUPPORTED_CLEAR_HEIGHT + 2) * (MAX_SUPPORTED_ROOT_WIDTH + 2);
+    static final int MAX_SPAWN_CANDIDATE_WORK = MAX_SPAWN_SUPPORT_CELLS
+            * (BLOCK_READ_WORK + COLLISION_INTERSECTION_WORK)
+            + MAX_SPAWN_OCCUPIED_CELLS * BLOCK_READ_WORK
+            + MAX_SPAWN_COLLISION_CELLS * (BLOCK_READ_WORK + COLLISION_INTERSECTION_WORK);
 
     record Bounds(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) { }
     record Footprint(int minX, int maxX, int minZ, int maxZ) { }
     record CellRange(int minX, int maxX, int minY, int maxY, int minZ, int maxZ) { }
     record Cell(int x, int y, int z) { }
+    record RootGeometry(int width, int clearHeight) { }
     static final class ChunkResidency {
         private static final Object RESIDENT = new Object();
         private final int minChunkX;
@@ -141,6 +190,7 @@ public final class DestinationSafety {
     static final class SpawnProbe implements SpawnDestination.CandidateProbe {
         static final int BLOCK_READ_WORK = 1;
         static final int COLLISION_INTERSECTION_WORK = 8;
+        static final int MAX_CELL_WORK = BLOCK_READ_WORK + COLLISION_INTERSECTION_WORK;
         private static final int REJECTED = -1;
         private static final int SUPPORT = 0;
         private static final int OCCUPIED = 1;
@@ -279,7 +329,7 @@ public final class DestinationSafety {
                     return new SpawnDestination.ProbeStep(SpawnDestination.ProbeOutcome.FITS, used);
                 }
                 int requiredWork = BLOCK_READ_WORK
-                        + (phase == COLLISION ? COLLISION_INTERSECTION_WORK : 0);
+                        + (phase == SUPPORT || phase == COLLISION ? COLLISION_INTERSECTION_WORK : 0);
                 if (availableWorldWork - used < requiredWork) break;
                 position.set(x, phase == SUPPORT ? minY - 1 : y, z);
                 Object captured = residency.chunkAtBlock(x, z);
@@ -351,6 +401,15 @@ public final class DestinationSafety {
         return new Bounds(root.minX - HOME_HORIZONTAL_MARGIN, root.minY,
                 root.minZ - HOME_HORIZONTAL_MARGIN, root.maxX + HOME_HORIZONTAL_MARGIN,
                 root.maxY + HOME_UPPER_MARGIN, root.maxZ + HOME_HORIZONTAL_MARGIN);
+    }
+
+    static RootGeometry rootGeometry(Entity root) {
+        return new RootGeometry((int) Math.max(1, Math.ceil(root.getBbWidth())),
+                (int) Math.max(3, Math.ceil(root.getBbHeight()) + 2));
+    }
+
+    static boolean rootGeometrySupported(int width, int clearHeight) {
+        return width <= MAX_SUPPORTED_ROOT_WIDTH && clearHeight <= MAX_SUPPORTED_CLEAR_HEIGHT;
     }
 
     static boolean blocksMountedHome(Bounds root, Bounds clearance, Bounds obstacle, boolean configuredBedPart) {
@@ -466,18 +525,20 @@ public final class DestinationSafety {
         CellRange owners = collisionOwnerCells(clearance);
         preloadInvolvedChunks(owners, new HashSet<>(), chunk -> loadChunk(level, chunk));
         if (containsHomeHazard(level, homeHazardCells(rootBounds))) return HomeFit.UNSAFE;
+        ConfiguredBed configuredBed = configuredBed(level, homeBlock);
         CollisionContext context = CollisionContext.of(root);
         for (int x = owners.minX; x <= owners.maxX; x++) {
             for (int y = owners.minY; y <= owners.maxY; y++) {
                 for (int z = owners.minZ; z <= owners.maxZ; z++) {
                     BlockPos blockPos = new BlockPos(x, y, z);
                     var state = level.getBlockState(blockPos);
-                    boolean bedPart = isConfiguredBedPart(level, blockPos, homeBlock);
-                    for (AABB local : state.getCollisionShape(level, blockPos, context).toAabbs()) {
-                        if (blocksMountedHome(rootBounds, clearance, bounds(local.move(blockPos)), bedPart)) {
-                            return HomeFit.BLOCKED;
-                        }
-                    }
+                    boolean bedPart = configuredBed.contains(blockPos);
+                    AABB checked = bedPart ? rootBox : clearanceBox;
+                    if (Shapes.joinIsNotEmpty(
+                            state.getCollisionShape(level, blockPos, context),
+                            Shapes.box(checked.minX - x, checked.minY - y, checked.minZ - z,
+                                    checked.maxX - x, checked.maxY - y, checked.maxZ - z),
+                            BooleanOp.AND)) return HomeFit.BLOCKED;
                 }
             }
         }
@@ -504,9 +565,22 @@ public final class DestinationSafety {
                 || !level.getWorldBorder().isWithinBounds(occupiedBox)) return false;
 
         CollisionContext context = CollisionContext.of(entity);
-        if (!loadedAndCollisionFree(occupied, chunk -> level.getChunkSource().getChunkNow(
-                        (int) (chunk >> 32), (int) chunk) != null,
-                cell -> collisionShapes(level, cell, context))) return false;
+        CellRange owners = collisionOwnerCells(occupied);
+        if (!allChunksLoaded(owners, chunk -> level.getChunkSource().getChunkNow(
+                (int) (chunk >> 32), (int) chunk) != null)) return false;
+        for (int x = owners.minX; x <= owners.maxX; x++) {
+            for (int y = owners.minY; y <= owners.maxY; y++) {
+                for (int z = owners.minZ; z <= owners.maxZ; z++) {
+                    BlockPos blockPos = new BlockPos(x, y, z);
+                    BlockState state = level.getBlockState(blockPos);
+                    if (Shapes.joinIsNotEmpty(
+                            state.getCollisionShape(level, blockPos, context),
+                            Shapes.box(occupied.minX - x, occupied.minY - y, occupied.minZ - z,
+                                    occupied.maxX - x, occupied.maxY - y, occupied.maxZ - z),
+                            BooleanOp.AND)) return false;
+                }
+            }
+        }
         for (int x = floor(occupied.minX); x <= floor(Math.nextDown(occupied.maxX)); x++) {
             for (int y = floor(occupied.minY); y <= floor(Math.nextDown(occupied.maxY)); y++) {
                 for (int z = floor(occupied.minZ); z <= floor(Math.nextDown(occupied.maxZ)); z++) {
@@ -535,7 +609,7 @@ public final class DestinationSafety {
     static List<Long> destinationChunks(double feetX, double feetZ) {
         int centerX = chunkCoordinate(floor(feetX));
         int centerZ = chunkCoordinate(floor(feetZ));
-        List<Long> chunks = new ArrayList<>(25);
+        List<Long> chunks = new ArrayList<>(DESTINATION_CHUNK_CAP);
         for (int x = centerX - 2; x <= centerX + 2; x++) {
             for (int z = centerZ - 2; z <= centerZ + 2; z++) chunks.add(chunkKey(x, z));
         }
@@ -567,12 +641,18 @@ public final class DestinationSafety {
     }
 
 
-    private static boolean isConfiguredBedPart(ServerLevel level, BlockPos candidate, BlockPos homeBlock) {
+    private record ConfiguredBed(BlockPos primary, BlockPos secondary) {
+        boolean contains(BlockPos candidate) {
+            return candidate.equals(primary) || secondary != null && candidate.equals(secondary);
+        }
+    }
+
+    private static ConfiguredBed configuredBed(ServerLevel level, BlockPos homeBlock) {
         var homeState = level.getBlockState(homeBlock);
-        if (!(homeState.getBlock() instanceof BedBlock)) return false;
-        if (candidate.equals(homeBlock)) return true;
+        if (!(homeState.getBlock() instanceof BedBlock)) return new ConfiguredBed(null, null);
         BlockPos other = homeBlock.relative(BedBlock.getConnectedDirection(homeState));
-        return candidate.equals(other) && level.getBlockState(other).getBlock() instanceof BedBlock;
+        return new ConfiguredBed(homeBlock,
+                level.getBlockState(other).getBlock() instanceof BedBlock ? other : null);
     }
 
     private static Bounds bounds(AABB box) {

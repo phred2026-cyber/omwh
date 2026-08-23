@@ -26,13 +26,13 @@ Server owners can allow valid homes in other dimensions. Missing, destroyed, blo
 
 `/spawn` takes you to the spawn destination selected for your current world. Server owners can control Overworld, Nether, End, and modded-dimension spawn travel separately.
 
-Outside the End, OMWH checks already-loaded positions in expanding hollow 3D cubes around spawn, up to 48 blocks on every axis, for solid ground and enough clear space for the player or mounted vehicle. Each new cube checks only its outer surface; previously checked interior positions aren't repeated. Large searches share a fixed server-wide work budget across ticks instead of freezing one tick, and OMWH cancels a pending result if the player or mounted group changes before it completes. Vehicle searches support roots up to 14 blocks wide and 16 blocks high; larger modded vehicles are reported as too large. Nether spawn uses Minecraft's normal Overworld-to-Nether coordinate scaling and world-border limits. In the End, Minecraft recreates and chooses the normal portal arrival platform, then OMWH checks that exact destination for environmental danger and enough room without searching elsewhere.
+Outside the End, OMWH checks already-loaded positions in expanding hollow 3D cubes around spawn, up to 48 blocks on every axis, for solid ground and enough clear space for the player or mounted vehicle. Each new cube checks only its outer surface; previously checked interior positions aren't repeated. Admission, mounted-group validation, search, final safety checks, and completion share one server-wide allowance for OMWH's bounded block, collision, passenger, effect, and bookkeeping operations. If synchronous admission would exceed the current tick's allowance, OMWH asks the player to try again; longer searches resume across ticks. OMWH also cancels a pending result if the player or mounted group changes before it completes. Normal mounted safety checks support roots up to 14 blocks wide with 16 blocks of clear height; larger modded vehicles are reported as too large before OMWH scans their full bounds. Nether spawn uses Minecraft's normal Overworld-to-Nether coordinate scaling and world-border limits. In the End, Minecraft recreates and chooses the normal portal arrival platform, then OMWH checks that exact destination for environmental danger and enough room without searching elsewhere.
 
 ### Bringing vehicles and friends
 
 When you use `/home` or `/spawn` while mounted, OMWH moves the vehicle or mount and everyone riding it. This includes boats, minecarts, horses, other mounted entities, and player passengers.
 
-The whole group stays attached during the teleport. If the destination does not have enough room, OMWH refuses the teleport rather than separating the riders or placing the vehicle inside blocks.
+The whole group stays attached during the teleport. Passenger trees are limited to 64 entities so validation and completion remain bounded; OMWH stops consuming the tree as soon as a 65th member is found, and larger groups are refused before movement with a clear message. If the destination does not have enough room, OMWH refuses the teleport rather than separating the riders or placing the vehicle inside blocks.
 
 ### Force commands
 
@@ -60,7 +60,7 @@ Damage cooldowns start when OMWH allows an incoming damage event. Another mod ca
 3. Remove any older OMWH jar from the server's `mods` folder, then put the new jar there. Keeping both versions causes Fabric Loader to stop on a duplicate mod ID.
 4. Start the server once to create `config/omwh.json`.
 
-Players do not need to install OMWH on their clients. OMWH also works in singleplayer.
+Players do not need to install OMWH on their clients. OMWH also works in singleplayer. Immediate accepted teleports prepare a fixed area of 25 destination chunks. That caps how many chunks OMWH requests; Minecraft's terrain-generation time is not a fixed-duration operation.
 
 ## Configuration
 

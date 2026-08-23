@@ -21,6 +21,40 @@ import java.util.function.Function;
 public final class TeleportService {
     private static final Logger LOGGER = LoggerFactory.getLogger("omwh");
     private static final EntityTree<Entity> ENTITY_TREE = new MinecraftEntityTree();
+    static final int MAX_PASSENGER_TREE_NODES = 64;
+    static final int MAX_PASSENGER_TREE_EDGES = MAX_PASSENGER_TREE_NODES - 1;
+    private static final int SNAPSHOT_NODE_PASSES = 5;
+    private static final int SNAPSHOT_EDGE_PASSES = 3;
+    private static final int SNAPSHOT_FIXED_WORK = 1;
+    static final int SNAPSHOT_WORK = MAX_PASSENGER_TREE_NODES * SNAPSHOT_NODE_PASSES
+            + MAX_PASSENGER_TREE_EDGES * SNAPSHOT_EDGE_PASSES + SNAPSHOT_FIXED_WORK;
+    static final int LIFECYCLE_CAPTURE_WORK = SNAPSHOT_WORK
+            + MAX_PASSENGER_TREE_NODES + 1;
+    static final int LIFECYCLE_VALIDATION_WORK = SNAPSHOT_WORK
+            + MAX_PASSENGER_TREE_NODES
+            + MAX_PASSENGER_TREE_EDGES
+            + MAX_PASSENGER_TREE_NODES
+            + MAX_PASSENGER_TREE_NODES
+            + 10;
+    static final int COMPLETION_WORK = SNAPSHOT_WORK
+            + MAX_PASSENGER_TREE_NODES
+            + MAX_PASSENGER_TREE_NODES + MAX_PASSENGER_TREE_EDGES
+            + SNAPSHOT_WORK
+            + 1 + MAX_PASSENGER_TREE_NODES + MAX_PASSENGER_TREE_EDGES
+            + 2 * MAX_PASSENGER_TREE_NODES
+            + MAX_PASSENGER_TREE_EDGES
+            + MAX_PASSENGER_TREE_NODES
+            + MAX_PASSENGER_TREE_NODES
+            + 2 * MAX_PASSENGER_TREE_NODES
+            + 2 * MAX_PASSENGER_TREE_NODES
+            + 3
+            + MAX_PASSENGER_TREE_EDGES;
+
+    static final class PassengerTreeTooLarge extends IllegalStateException {
+        PassengerTreeTooLarge() {
+            super("passenger tree exceeds the supported " + MAX_PASSENGER_TREE_NODES + " entities");
+        }
+    }
 
     interface EntityTree<T> {
         UUID uuid(T entity);
@@ -33,6 +67,7 @@ public final class TeleportService {
     }
 
     enum Outcome { SUCCESS, FAILED, PARTIAL }
+    enum LifecycleStatus { CURRENT, STALE, TOO_LARGE }
     record Attempt<T>(Outcome outcome, List<T> entities) {
         boolean success() { return outcome == Outcome.SUCCESS; }
     }
@@ -79,9 +114,13 @@ public final class TeleportService {
     }
 
     static boolean isLifecycleCurrent(LifecycleFence<Entity> fence) {
+        return lifecycleStatus(fence) == LifecycleStatus.CURRENT;
+    }
+
+    static LifecycleStatus lifecycleStatus(LifecycleFence<Entity> fence) {
         ServerPlayer player = (ServerPlayer) fence.player();
         Entity root = player.getRootVehicle();
-        return isLifecycleCurrent(fence, player, root, player.level(), root != player,
+        return lifecycleStatus(fence, player, root, player.level(), root != player,
                 root.getBbWidth(), root.getBbHeight(), !player.hasDisconnected(), player.isAlive(), ENTITY_TREE);
     }
 
@@ -102,23 +141,35 @@ public final class TeleportService {
                                           Object sourceLevel, boolean mounted,
                                           double rootWidth, double rootHeight,
                                           boolean connected, boolean alive, EntityTree<T> tree) {
+        return lifecycleStatus(fence, player, root, sourceLevel, mounted, rootWidth, rootHeight,
+                connected, alive, tree) == LifecycleStatus.CURRENT;
+    }
+
+    static <T> LifecycleStatus lifecycleStatus(LifecycleFence<T> fence, T player, T root,
+                                               Object sourceLevel, boolean mounted,
+                                               double rootWidth, double rootHeight,
+                                               boolean connected, boolean alive, EntityTree<T> tree) {
         if (!connected || !alive || player != fence.player() || root != fence.root()
                 || sourceLevel != fence.sourceLevel() || mounted != fence.mounted()
                 || Double.compare(rootWidth, fence.rootWidth()) != 0
                 || Double.compare(rootHeight, fence.rootHeight()) != 0
-                || !fence.playerUuid().equals(tree.uuid(player))) return false;
+                || !fence.playerUuid().equals(tree.uuid(player))) return LifecycleStatus.STALE;
         try {
             Snapshot<T> current = snapshot(root, tree);
             validateSourceTree(current, sourceLevel, tree);
             if (!fence.tree().rootUuid().equals(current.rootUuid())
                     || !fence.tree().parents().equals(current.parents())
-                    || !fence.tree().entities().keySet().equals(current.entities().keySet())) return false;
-            for (Map.Entry<UUID, T> entry : fence.tree().entities().entrySet()) {
-                if (current.entities().get(entry.getKey()) != entry.getValue()) return false;
+                    || !fence.tree().entities().keySet().equals(current.entities().keySet())) {
+                return LifecycleStatus.STALE;
             }
-            return true;
+            for (Map.Entry<UUID, T> entry : fence.tree().entities().entrySet()) {
+                if (current.entities().get(entry.getKey()) != entry.getValue()) return LifecycleStatus.STALE;
+            }
+            return LifecycleStatus.CURRENT;
+        } catch (PassengerTreeTooLarge tooLarge) {
+            return LifecycleStatus.TOO_LARGE;
         } catch (RuntimeException invalid) {
-            return false;
+            return LifecycleStatus.STALE;
         }
     }
 
@@ -231,13 +282,16 @@ public final class TeleportService {
         identities.put(root, Boolean.TRUE);
 
         while (!queue.isEmpty()) {
+            if (entities.size() == MAX_PASSENGER_TREE_NODES) throw new PassengerTreeTooLarge();
             T parent = queue.removeFirst();
             UUID parentUuid = requireUuid(tree.uuid(parent));
             if (entities.put(parentUuid, parent) != null) {
                 throw new IllegalStateException("passenger tree contains duplicate UUID " + parentUuid);
             }
             order.add(parentUuid);
-            List<T> directChildren = List.copyOf(tree.children(parent));
+            List<T> directChildren = tree.children(parent);
+            int remainingCapacity = MAX_PASSENGER_TREE_NODES - entities.size() - queue.size();
+            if (directChildren.size() > remainingCapacity) throw new PassengerTreeTooLarge();
             if (tree.isPlayer(parent)) {
                 players.put(parentUuid, parent);
                 if (!directChildren.isEmpty()) {

@@ -19,6 +19,9 @@ import java.util.Map;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
+import java.util.function.Predicate;
+import java.util.function.Supplier;
+
 
 public final class Commands {
     private static final Logger LOGGER = LoggerFactory.getLogger("omwh");
@@ -28,15 +31,108 @@ public final class Commands {
     static final String SPAWN_DISABLED = "§cSpawn teleporting is disabled for this dimension.";
     static final String SPAWN_PENDING = "§eA /spawn safety search is already in progress.";
     static final String SPAWN_ANCHOR_CHANGED = "§cWorld spawn changed while OMWH was checking safety. Please try /spawn again.";
+    static final String SPAWN_BUSY = "§cOMWH reached its server work limit for this tick. Please try /spawn again.";
+    static final String PASSENGER_TREE_TOO_LARGE = "§cYour passenger group is too large for OMWH to teleport safely.";
     static final int SEARCH_CANDIDATES_PER_TICK = 4_096;
-    static final int SEARCH_WORLD_WORK_PER_TICK = 4_096;
+    static final int MAX_EFFECT_DISPATCHES = 1 + 40;
+    static final int MAX_IMMEDIATE_ROUTE_WORK = Math.max(
+            DestinationSafety.MAX_MOUNTED_HOME_SAFETY_WORK,
+            DestinationSafety.MAX_END_SAFETY_WORK)
+            + DestinationSafety.DESTINATION_CHUNK_CAP
+            + MAX_EFFECT_DISPATCHES
+            + TeleportService.COMPLETION_WORK;
+    static final int SEARCH_WORLD_WORK_PER_TICK = TeleportService.LIFECYCLE_CAPTURE_WORK
+            + MAX_IMMEDIATE_ROUTE_WORK;
+    static final int PENDING_ROUTE_MINIMUM_PROGRESS_WORK = DestinationSafety.SpawnProbe.MAX_CELL_WORK;
+    static final int PENDING_ROUTE_WORK_SLICE = SEARCH_CANDIDATES_PER_TICK
+            * PENDING_ROUTE_MINIMUM_PROGRESS_WORK;
+    static final int PENDING_ADVANCEMENT_WORK_PER_TICK = TeleportService.LIFECYCLE_VALIDATION_WORK
+            + PENDING_ROUTE_WORK_SLICE
+            + TeleportService.COMPLETION_WORK;
+    static final int MAX_PENDING_VISIT_WORK = PENDING_ADVANCEMENT_WORK_PER_TICK;
     private final OmwhConfig config;
     private final Cooldowns cooldowns;
-    private final PendingSearches<UUID, SpawnCompletion> pendingSpawns = new PendingSearches<>();
+    private final PendingSearches<UUID, Void> pendingSpawns = new PendingSearches<>();
+    private final TickWorkAllowance serverWork = new TickWorkAllowance(SEARCH_WORLD_WORK_PER_TICK);
     private long pendingTickEpoch;
 
     @FunctionalInterface
     interface PendingWork<V> { PendingStep<V> step(int candidateBudget, int worldWorkBudget); }
+
+    interface CoordinatorHooks<V> {
+        TeleportService.LifecycleStatus lifecycleStatus();
+        void lifecycleRejected(TeleportService.LifecycleStatus status);
+        boolean finalAdmission(V value);
+        boolean anchorCurrent(V value);
+        void complete(V value);
+    }
+
+    static final class CoordinatedPending<V> {
+        private final PendingWork<V> route;
+        private final CoordinatorHooks<V> hooks;
+        private final int lifecycleWork;
+        private final int completionWork;
+        private long lifecycleEpoch = Long.MIN_VALUE;
+        private boolean routeComplete;
+        private V value;
+
+        CoordinatedPending(PendingWork<V> route, CoordinatorHooks<V> hooks,
+                           int lifecycleWork, int completionWork) {
+            this.route = route;
+            this.hooks = hooks;
+            this.lifecycleWork = lifecycleWork;
+            this.completionWork = completionWork;
+        }
+
+        PendingStep<Void> step(long epoch, int candidateBudget, int worldWorkBudget) {
+            int candidatesUsed = 0;
+            int worldWorkUsed = 0;
+            int minimumProgressWork = lifecycleWork + completionWork
+                    + (routeComplete ? 0 : PENDING_ROUTE_MINIMUM_PROGRESS_WORK);
+            if (lifecycleEpoch != epoch && worldWorkBudget < minimumProgressWork) {
+                return PendingStep.pending(0, 0);
+            }
+            if (lifecycleEpoch != epoch) {
+                lifecycleEpoch = epoch;
+                worldWorkUsed += lifecycleWork;
+                TeleportService.LifecycleStatus lifecycle = hooks.lifecycleStatus();
+                if (lifecycle != TeleportService.LifecycleStatus.CURRENT) {
+                    hooks.lifecycleRejected(lifecycle);
+                    return PendingStep.complete(null, 0, worldWorkUsed);
+                }
+            }
+            if (!routeComplete) {
+                int reservedRouteWork = worldWorkBudget - worldWorkUsed - completionWork;
+                if (reservedRouteWork <= 0) return PendingStep.pending(0, worldWorkUsed);
+                int routeWorkBudget = Math.min(PENDING_ROUTE_WORK_SLICE, reservedRouteWork);
+                PendingStep<V> advanced = route.step(candidateBudget, routeWorkBudget);
+                candidatesUsed = advanced.candidatesUsed();
+                worldWorkUsed += advanced.worldWorkUsed();
+                if (!advanced.complete()) return PendingStep.pending(candidatesUsed, worldWorkUsed);
+                routeComplete = true;
+                value = advanced.value();
+            }
+            if (worldWorkBudget - worldWorkUsed < completionWork) {
+                return PendingStep.pending(candidatesUsed, worldWorkUsed);
+            }
+            worldWorkUsed += completionWork;
+            if (hooks.finalAdmission(value) && hooks.anchorCurrent(value)) hooks.complete(value);
+            return PendingStep.complete(null, candidatesUsed, worldWorkUsed);
+        }
+    }
+
+    static final class TickWorkAllowance {
+        private final int limit;
+        private int remaining;
+        TickWorkAllowance(int limit) { this.limit = limit; this.remaining = limit; }
+        boolean claim(int work) {
+            if (work < 0 || work > remaining) return false;
+            remaining -= work;
+            return true;
+        }
+        int remaining() { return remaining; }
+        void reset() { remaining = limit; }
+    }
 
     record PendingStep<V>(boolean complete, V value, int candidatesUsed, int worldWorkUsed) {
         static <V> PendingStep<V> pending(int candidatesUsed, int worldWorkUsed) {
@@ -72,7 +168,8 @@ public final class Commands {
                 PendingWork<V> work = searches.get(key);
                 if (work == null) continue;
                 int candidateSlice = Math.min(1, candidateBudget - candidatesUsed);
-                int worldSlice = Math.min(64, worldWorkBudget - worldWorkUsed);
+                int worldSlice = Math.min(MAX_PENDING_VISIT_WORK,
+                        worldWorkBudget - worldWorkUsed);
                 PendingStep<V> step = work.step(candidateSlice, worldSlice);
                 if (step.candidatesUsed < 0 || step.candidatesUsed > candidateSlice
                         || step.worldWorkUsed < 0 || step.worldWorkUsed > worldSlice) {
@@ -84,21 +181,52 @@ public final class Commands {
                     searches.remove(key);
                     itemsCompleted++;
                     completion.accept(step.value);
+                } else if (step.candidatesUsed == 0 && step.worldWorkUsed == 0) {
+                    roundRobin.addFirst(key);
+                    break;
                 } else {
                     roundRobin.addLast(key);
                 }
-                if (!step.complete && step.candidatesUsed == 0 && step.worldWorkUsed == 0) break;
             }
             return new PendingTick(candidatesUsed, worldWorkUsed, itemsCompleted);
         }
     }
 
-    private record SpawnCompletion(ServerPlayer player, TeleportService.LifecycleFence<Entity> lifecycle,
-                                   SpawnDestination.Result result, boolean cancelled) { }
-
     Commands(OmwhConfig config, Cooldowns cooldowns) {
         this.config = config;
         this.cooldowns = cooldowns;
+    }
+
+    <V> PendingWork<Void> createSpawnCoordinator(
+            PendingWork<V> route,
+            Supplier<TeleportService.LifecycleStatus> lifecycle,
+            Predicate<V> finalAdmission,
+            Predicate<V> anchorCurrent,
+            Consumer<V> completion,
+            Consumer<TeleportService.LifecycleStatus> lifecycleRejection) {
+        CoordinatedPending<V> coordinated = new CoordinatedPending<>(route, new CoordinatorHooks<>() {
+            @Override public TeleportService.LifecycleStatus lifecycleStatus() { return lifecycle.get(); }
+            @Override public void lifecycleRejected(TeleportService.LifecycleStatus status) {
+                lifecycleRejection.accept(status);
+            }
+            @Override public boolean finalAdmission(V value) { return finalAdmission.test(value); }
+            @Override public boolean anchorCurrent(V value) { return anchorCurrent.test(value); }
+            @Override public void complete(V value) { completion.accept(value); }
+        }, TeleportService.LIFECYCLE_VALIDATION_WORK, TeleportService.COMPLETION_WORK);
+        return (candidateBudget, worldWorkBudget) ->
+                coordinated.step(pendingTickEpoch, candidateBudget, worldWorkBudget);
+    }
+
+    static boolean finalCooldownAdmission(Cooldowns cooldowns, UUID playerId, OmwhConfig config,
+                                          Consumer<String> feedback) {
+        Cooldowns.Blocking blocking = cooldowns.blocking(playerId);
+        if (blocking.type() == Cooldowns.Type.NONE) return true;
+        feedback.accept(cooldownMessage(config, blocking));
+        return false;
+    }
+
+    boolean enqueuePending(UUID playerId, PendingWork<Void> pending) {
+        return pendingSpawns.add(playerId, pending);
     }
 
     void register(CommandDispatcher<CommandSourceStack> dispatcher) {
@@ -152,6 +280,11 @@ public final class Commands {
         pendingSpawns.remove(player.getUUID());
         try {
             if (!admit(player)) return 0;
+            if (!serverWork.claim(TeleportService.LIFECYCLE_CAPTURE_WORK + MAX_IMMEDIATE_ROUTE_WORK)) {
+                send(player, SPAWN_BUSY);
+                return 0;
+            }
+            TeleportService.captureLifecycle(player);
             HomeDestination.Result destination = HomeDestination.find(
                     player, force, config.enableCrossDimensionTeleport);
             switch (destination.outcome()) {
@@ -160,8 +293,10 @@ public final class Commands {
                 case VEHICLE_TOO_LARGE -> send(player, VEHICLE_TOO_LARGE);
                 case UNSAFE -> send(player, unsafeMessage(
                         config.unsafeHomeMessage, config.homeCommand, config.enableForceOverride));
-                case ACCEPT -> { return teleport(player, destination.destination(), true, null, false); }
+                case ACCEPT -> { return teleport(player, destination.destination(), true, false); }
             }
+        } catch (TeleportService.PassengerTreeTooLarge tooLarge) {
+            sendSafely(player, PASSENGER_TREE_TOO_LARGE);
         } catch (RuntimeException failure) {
             LOGGER.error("Unexpected /home failure for {}", player.getGameProfile().name(), failure);
             sendSafely(player, INTERNAL_ERROR.formatted(config.homeCommand));
@@ -192,34 +327,60 @@ public final class Commands {
             }
             ServerLevel selectedLevel = target == SpawnDestination.Target.OVERWORLD
                     ? level.getServer().overworld() : level;
+            boolean immediate = force || selectedLevel.dimension().equals(net.minecraft.world.level.Level.END);
+            if (immediate) {
+                if (!serverWork.claim(TeleportService.LIFECYCLE_CAPTURE_WORK + MAX_IMMEDIATE_ROUTE_WORK)) {
+                    send(player, SPAWN_BUSY);
+                    return 0;
+                }
+                TeleportService.captureLifecycle(player);
+            } else if (!serverWork.claim(SpawnDestination.ADMISSION_SNAPSHOT_PROBE_WORK)) {
+                send(player, SPAWN_BUSY);
+                return 0;
+            }
             SpawnDestination.Plan plan = SpawnDestination.plan(player, selectedLevel, force);
-            if (plan.immediate() != null) return completeSpawn(player, plan.immediate(), null);
+            if (plan.immediate() != null) return completeSpawn(player, plan.immediate());
 
             SpawnDestination.Pending search = plan.pending();
+            if (!serverWork.claim(TeleportService.LIFECYCLE_CAPTURE_WORK)) {
+                send(player, SPAWN_BUSY);
+                return 0;
+            }
             TeleportService.LifecycleFence<Entity> lifecycle = TeleportService.captureLifecycle(player);
-            long[] lifecycleEpoch = {Long.MIN_VALUE};
+            PendingWork<Void> coordinated = createSpawnCoordinator(
+                    (candidateBudget, worldWorkBudget) -> {
+                        SpawnDestination.Tick used = search.tick(candidateBudget, worldWorkBudget);
+                        if (!search.complete()) return PendingStep.pending(
+                                used.candidatesStarted(), used.worldWork());
+                        return PendingStep.complete(search.result(), used.candidatesStarted(), used.worldWork());
+                    },
+                    () -> TeleportService.lifecycleStatus(lifecycle),
+                    result -> result.outcome() != SpawnDestination.Outcome.ACCEPT || admit(player),
+                    result -> {
+                        if (result.outcome() != SpawnDestination.Outcome.ACCEPT) return true;
+                        boolean current = SpawnDestination.matchesSearchAnchor(result.searchAnchor(),
+                                SpawnDestination.currentAnchor(result.destination().level()));
+                        if (!current) sendSafely(player, SPAWN_ANCHOR_CHANGED);
+                        return current;
+                    },
+                    result -> completeSpawn(player, result),
+                    status -> {
+                        if (status == TeleportService.LifecycleStatus.TOO_LARGE) {
+                            sendSafely(player, PASSENGER_TREE_TOO_LARGE);
+                        }
+                    });
             pendingSpawns.add(player.getUUID(), (candidateBudget, worldWorkBudget) -> {
                 try {
-                    if (shouldCheckLifecycle(lifecycleEpoch[0], pendingTickEpoch)) {
-                        lifecycleEpoch[0] = pendingTickEpoch;
-                        if (!TeleportService.isLifecycleCurrent(lifecycle)) {
-                            return PendingStep.complete(
-                                    new SpawnCompletion(player, lifecycle, null, true), 0, 0);
-                        }
-                    }
-                    SpawnDestination.Tick used = search.tick(candidateBudget, worldWorkBudget);
-                    if (!search.complete()) return PendingStep.pending(
-                            used.candidatesStarted(), used.worldWork());
-                    return PendingStep.complete(new SpawnCompletion(
-                                    player, lifecycle, search.result(), false),
-                            used.candidatesStarted(), used.worldWork());
+                    return coordinated.step(candidateBudget, worldWorkBudget);
                 } catch (RuntimeException failure) {
                     LOGGER.error("Unexpected pending /spawn failure for {}", player.getGameProfile().name(), failure);
-                    return failedPendingStep(new SpawnCompletion(player, lifecycle, null, false),
-                            candidateBudget, worldWorkBudget);
+                    sendSafely(player, INTERNAL_ERROR.formatted(config.spawnCommand));
+                    return failedPendingStep(null, candidateBudget, worldWorkBudget);
                 }
             });
             return 1;
+        } catch (TeleportService.PassengerTreeTooLarge tooLarge) {
+            sendSafely(player, PASSENGER_TREE_TOO_LARGE);
         } catch (RuntimeException failure) {
             LOGGER.error("Unexpected /spawn failure for {}", player.getGameProfile().name(), failure);
             sendSafely(player, INTERNAL_ERROR.formatted(config.spawnCommand));
@@ -232,13 +393,6 @@ public final class Commands {
         return force ? PendingSpawnAction.CANCEL_AND_CONTINUE : PendingSpawnAction.REFUSE;
     }
 
-    static boolean lifecycleCurrentAtCompletion(BooleanSupplier current) {
-        return current.getAsBoolean();
-    }
-
-    static boolean shouldCheckLifecycle(long lastCheckedEpoch, long currentEpoch) {
-        return lastCheckedEpoch != currentEpoch;
-    }
 
     static <V> PendingStep<V> failedPendingStep(V value, int candidateBudget, int worldWorkBudget) {
         return PendingStep.complete(value, candidateBudget, worldWorkBudget);
@@ -251,27 +405,20 @@ public final class Commands {
     void tick() {
         try {
             pendingTickEpoch++;
-            pendingSpawns.tick(SEARCH_CANDIDATES_PER_TICK, SEARCH_WORLD_WORK_PER_TICK, completion -> {
-                try {
-                    if (completion.cancelled) return;
-                    if (completion.result == null) {
-                        sendSafely(completion.player, INTERNAL_ERROR.formatted(config.spawnCommand));
-                    } else completeSpawn(completion.player, completion.result, completion.lifecycle);
-                } catch (RuntimeException failure) {
-                    LOGGER.error("Unexpected pending /spawn completion failure", failure);
-                    sendSafely(completion.player, INTERNAL_ERROR.formatted(config.spawnCommand));
-                }
-            });
+            PendingTick used = pendingSpawns.tick(SEARCH_CANDIDATES_PER_TICK,
+                    Math.min(serverWork.remaining(), PENDING_ADVANCEMENT_WORK_PER_TICK), ignored -> { });
+            if (!serverWork.claim(used.worldWorkUsed())) throw new IllegalStateException("coordinator exceeded tick allowance");
         } catch (RuntimeException failure) {
             LOGGER.error("Unexpected OMWH END_SERVER_TICK failure", failure);
+        } finally {
+            serverWork.reset();
         }
     }
 
     void removePending(UUID playerId) { pendingSpawns.remove(playerId); }
     void clearPending() { pendingSpawns.clear(); }
 
-    private int completeSpawn(ServerPlayer player, SpawnDestination.Result destination,
-                              TeleportService.LifecycleFence<Entity> lifecycle) {
+    private int completeSpawn(ServerPlayer player, SpawnDestination.Result destination) {
         return switch (destination.outcome()) {
             case NO_WORLD_SPAWN -> { send(player, "§cCannot determine world spawn."); yield 0; }
             case VEHICLE_TOO_LARGE -> { send(player, VEHICLE_TOO_LARGE); yield 0; }
@@ -281,29 +428,19 @@ public final class Commands {
                 yield 0;
             }
             case ACCEPT -> {
-                if (lifecycle != null && !lifecycleCurrentAtCompletion(
-                        () -> TeleportService.isLifecycleCurrent(lifecycle))) yield 0;
-                if (lifecycle != null && !admit(player)) yield 0;
-                if (lifecycle != null && !SpawnDestination.matchesSearchAnchor(destination.searchAnchor(),
-                        SpawnDestination.currentAnchor(destination.destination().level()))) {
-                    sendSafely(player, SPAWN_ANCHOR_CHANGED);
-                    yield 0;
-                }
-                yield teleport(player, destination.destination(), false, lifecycle,
+                yield teleport(player, destination.destination(), false,
                         destination.incrementalDestinationReady());
             }
         };
     }
 
     private boolean admit(ServerPlayer player) {
-        Cooldowns.Blocking blocking = cooldowns.blocking(player.getUUID());
-        if (blocking.type() == Cooldowns.Type.NONE) return true;
-        send(player, cooldownMessage(config, blocking));
-        return false;
+        return finalCooldownAdmission(cooldowns, player.getUUID(), config,
+                message -> send(player, message));
     }
 
     private int teleport(ServerPlayer player, DestinationSafety.Prepared destination, boolean home,
-                         TeleportService.LifecycleFence<Entity> lifecycle, boolean incrementalDestinationReady) {
+                         boolean incrementalDestinationReady) {
         if (shouldLoadDestinationChunks(incrementalDestinationReady)) {
             DestinationSafety.loadDestinationChunks(destination.level(), destination.position());
         }

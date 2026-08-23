@@ -9,6 +9,7 @@ import net.minecraft.world.level.portal.TeleportTransition;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.function.BooleanSupplier;
+import java.util.function.Supplier;
 
 public final class HomeDestination {
     enum Decision { ACCEPT, NO_HOME, CROSS_DIMENSION }
@@ -43,6 +44,12 @@ public final class HomeDestination {
         return MountedChoice.VEHICLE_TOO_LARGE;
     }
 
+    static Outcome mountedGeometryOutcome(int width, int clearHeight,
+                                          Supplier<DestinationSafety.HomeFit> safety) {
+        if (!DestinationSafety.rootGeometrySupported(width, clearHeight)) return Outcome.VEHICLE_TOO_LARGE;
+        return safety.get() == DestinationSafety.HomeFit.FITS ? Outcome.ACCEPT : Outcome.UNSAFE;
+    }
+
     static Result find(ServerPlayer player, boolean force, boolean crossDimensionEnabled) {
         var respawnConfig = player.getRespawnConfig();
         if (respawnConfig == null) return new Result(Outcome.NO_HOME, null);
@@ -72,6 +79,11 @@ public final class HomeDestination {
         if (force) {
             return new Result(Outcome.ACCEPT, DestinationSafety.Prepared.ordinary(
                     respawn.newLevel(), respawn.position(), root.getYRot(), root.getXRot()));
+        }
+
+        DestinationSafety.RootGeometry geometry = DestinationSafety.rootGeometry(root);
+        if (!DestinationSafety.rootGeometrySupported(geometry.width(), geometry.clearHeight())) {
+            return new Result(Outcome.VEHICLE_TOO_LARGE, null);
         }
 
         BlockPos homeBlock = respawnConfig.respawnData().pos();

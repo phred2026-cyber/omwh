@@ -11,6 +11,7 @@ import net.minecraft.world.level.block.Blocks;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 public final class CommandsAndCooldownsTest {
@@ -24,8 +25,13 @@ public final class CommandsAndCooldownsTest {
         pendingSpawnLifecycleRejectsDuplicatesAndCompletesExactlyOnce();
         pendingSpawnSchedulingSharesOneFairServerWideBudget();
         productionPendingSchedulerSlicesRevalidationAndRetiresStaleWork();
+        commandsTickPassesASeparatePendingAdvancementSlice();
+        productionCoordinatorOwnsLifecycleFinalGatesAndDispatch();
+        productionFactoryRunsFinalGatesAndOversizeFeedbackThroughCommandsTick();
+        admissionAndLifecycleWorkShareHardAggregateAllowances();
+        zeroProgressKeepsTheBlockedRequestNext();
         pendingCommandAdmissionCancelsOnlyCompetingTeleports();
-        System.out.println("CommandsAndCooldownsTest PASS (9 behavior groups)");
+        System.out.println("CommandsAndCooldownsTest PASS (13 behavior groups)");
     }
 
     private static void forceSyntaxFollowsTheServerSetting() {
@@ -141,6 +147,9 @@ public final class CommandsAndCooldownsTest {
         check(Commands.unsafeMessage(config.unsafeSpawnMessage, config.spawnCommand, false)
                         .equals(config.unsafeSpawnMessage),
                 "unsafe spawn does not advertise a disabled force command");
+        check(Commands.PASSENGER_TREE_TOO_LARGE.toLowerCase().contains("passenger")
+                        && Commands.PASSENGER_TREE_TOO_LARGE.toLowerCase().contains("large"),
+                "passenger cap denial has deliberate player-facing feedback");
     }
 
     private static void teleportOutcomesUseInternalFailureAndPartialPolicies() {
@@ -266,21 +275,13 @@ public final class CommandsAndCooldownsTest {
         }), "production pending route added behind stale completions");
 
         List<SpawnDestination.Result> completions = new ArrayList<>();
-        java.util.concurrent.atomic.AtomicInteger lifecycleChecks = new java.util.concurrent.atomic.AtomicInteger();
+
         long totalWorldWork = 0;
         int schedulerTicks = 0;
         Commands.PendingTick first = null;
         while (pending.size() > 0) {
             Commands.PendingTick used = pending.tick(Commands.SEARCH_CANDIDATES_PER_TICK,
-                    Commands.SEARCH_WORLD_WORK_PER_TICK, completion -> {
-                        completions.add(completion);
-                        if (completion.incrementalDestinationReady()) {
-                            check(Commands.lifecycleCurrentAtCompletion(() -> {
-                                lifecycleChecks.incrementAndGet();
-                                return true;
-                            }), "accepted pending completion passes its final lifecycle fence");
-                        }
-                    });
+                    Commands.PENDING_ADVANCEMENT_WORK_PER_TICK, completions::add);
             if (first == null) first = used;
             check(used.candidatesUsed() <= Commands.SEARCH_CANDIDATES_PER_TICK
                             && used.worldWorkUsed() <= Commands.SEARCH_WORLD_WORK_PER_TICK,
@@ -290,29 +291,211 @@ public final class CommandsAndCooldownsTest {
             check(schedulerTicks < 30, "search and maximum revalidation complete over bounded slices");
         }
 
-        check(first != null && first.itemsCompleted() == 3 && first.worldWorkUsed() > 0,
-                "multiple zero-work stale completions retire without blocking later valid work");
-        check(Commands.shouldCheckLifecycle(4, 5) && !Commands.shouldCheckLifecycle(5, 5),
-                "production epoch fence checks each pending request once per server tick");
+        check(first != null && first.itemsCompleted() >= 3 && first.worldWorkUsed() > 0,
+                "multiple zero-work stale completions retire before later valid work advances in the same tick");
         Commands.PendingStep<String> failed = Commands.failedPendingStep("failed", 7, 11);
         check(failed.complete() && failed.candidatesUsed() == 7 && failed.worldWorkUsed() == 11,
                 "pending exceptions conservatively consume their full assigned slice");
         check(!Commands.shouldLoadDestinationChunks(true)
                         && Commands.shouldLoadDestinationChunks(false),
                 "incremental spawn skips broad chunk generation while immediate routes retain preparation");
-        long revalidationWorldWork = totalWorldWork - 44_804;
-        check(revalidationWorldWork == 44_804,
-                "maximum 14x16 live revalidation is fully charged across scheduler slices");
-        check(totalWorldWork == 89_608,
-                "search and fresh revalidation both use the production weighted-work accounting");
+        long revalidationWorldWork = totalWorldWork - 46_372;
+        check(revalidationWorldWork == 46_376,
+                "maximum live revalidation charges four final snapshot probes plus safety work");
+        check(totalWorldWork == 92_748,
+                "search, final snapshot probes, and fresh revalidation share production accounting");
         check(completions.size() == 4
                         && completions.getLast().outcome() == SpawnDestination.Outcome.ACCEPT
                         && completions.getLast().incrementalDestinationReady(),
                 "stale and accepted lifecycle completions are each delivered exactly once");
-        check(lifecycleChecks.get() == 1,
-                "complete passenger-tree lifecycle validation runs once at accepted completion, not per slice");
+        check(schedulerTicks > 1,
+                "maximum production search plus live revalidation remains genuinely resumable");
+
         System.out.printf("Pending scheduler ticks=%d totalWorldWork=%d revalidationWorldWork=%d completions=%d%n",
                 schedulerTicks, totalWorldWork, revalidationWorldWork, completions.size());
+    }
+
+    private static void commandsTickPassesASeparatePendingAdvancementSlice() {
+        OmwhConfig config = new OmwhConfig();
+        Commands commands = new Commands(config, new Cooldowns(config, () -> 1_000L));
+        AtomicInteger suppliedWork = new AtomicInteger();
+        check(commands.enqueuePending(UUID.randomUUID(), (candidateBudget, worldBudget) -> {
+                    suppliedWork.set(worldBudget);
+                    return Commands.PendingStep.pending(1, worldBudget);
+                }), "pending advancement probe enqueued");
+        commands.tick();
+        check(suppliedWork.get() == Commands.PENDING_ADVANCEMENT_WORK_PER_TICK,
+                "Commands.tick passes the separately derived pending advancement slice");
+        check(Commands.PENDING_ADVANCEMENT_WORK_PER_TICK < Commands.SEARCH_WORLD_WORK_PER_TICK,
+                "pending advancement is strictly smaller than the aggregate immediate-plus-pending allowance");
+        check(Commands.PENDING_ADVANCEMENT_WORK_PER_TICK
+                        == TeleportService.LIFECYCLE_VALIDATION_WORK
+                        + Commands.PENDING_ROUTE_WORK_SLICE
+                        + TeleportService.COMPLETION_WORK,
+                "pending slice reserves lifecycle validation, bounded route advancement, and final completion");
+    }
+
+    private static void productionCoordinatorOwnsLifecycleFinalGatesAndDispatch() {
+        List<String> order = new ArrayList<>();
+        Commands.CoordinatedPending<String> coordinated = new Commands.CoordinatedPending<>(
+                (candidateBudget, worldBudget) -> {
+                    order.add("route");
+                    return Commands.PendingStep.complete("accepted", 1, 1);
+                }, new Commands.CoordinatorHooks<>() {
+                    @Override public TeleportService.LifecycleStatus lifecycleStatus() {
+                        order.add("lifecycle");
+                        return TeleportService.LifecycleStatus.CURRENT;
+                    }
+                    @Override public void lifecycleRejected(TeleportService.LifecycleStatus status) {
+                        throw new AssertionError("current lifecycle cannot reject");
+                    }
+                    @Override public boolean finalAdmission(String value) { order.add("admission:" + value); return true; }
+                    @Override public boolean anchorCurrent(String value) { order.add("anchor:" + value); return true; }
+                    @Override public void complete(String value) { order.add("complete:" + value); }
+                }, 2, 3);
+
+        Commands.PendingStep<Void> first = coordinated.step(1, 1,
+                2 + 3 + Commands.PENDING_ROUTE_MINIMUM_PROGRESS_WORK - 1);
+        check(!first.complete() && first.candidatesUsed() == 0 && first.worldWorkUsed() == 0,
+                "coordinator waits until lifecycle, atomic route progress, and completion are all reserved");
+        Commands.PendingStep<Void> second = coordinated.step(1, 1,
+                2 + 3 + Commands.PENDING_ROUTE_MINIMUM_PROGRESS_WORK);
+        check(second.complete() && second.candidatesUsed() == 1 && second.worldWorkUsed() == 6,
+                "reserved lifecycle, route, and completion dispatch make progress without deadlock");
+        check(order.equals(List.of("lifecycle", "route", "admission:accepted",
+                        "anchor:accepted", "complete:accepted")),
+                "production coordinator orders lifecycle, route, final admission, anchor, and completion dispatch");
+    }
+
+    private static void productionFactoryRunsFinalGatesAndOversizeFeedbackThroughCommandsTick() {
+        OmwhConfig config = new OmwhConfig();
+        AtomicLong now = new AtomicLong(1_000L);
+        Cooldowns cooldowns = new Cooldowns(config, now::get);
+        Commands commands = new Commands(config, cooldowns);
+        UUID player = UUID.randomUUID();
+        BlockPos acceptedAnchor = new BlockPos(4, 70, -2);
+        List<String> events = new ArrayList<>();
+
+        Commands.PendingWork<Void> accepted = commands.createSpawnCoordinator(
+                (candidateBudget, worldBudget) -> Commands.PendingStep.complete("accepted", 1, 1),
+                () -> TeleportService.LifecycleStatus.CURRENT,
+                value -> Commands.finalCooldownAdmission(cooldowns, player, config, events::add),
+                value -> SpawnDestination.matchesSearchAnchor(acceptedAnchor, acceptedAnchor),
+                value -> events.add("complete:" + value),
+                status -> events.add("lifecycle:" + status));
+        check(commands.enqueuePending(player, accepted), "production-created accepted coordinator enqueued");
+        commands.tick();
+        check(events.equals(List.of("complete:accepted")),
+                "Commands.tick runs cooldown admission, anchor comparison, and completion dispatch");
+
+        cooldowns.recordRegular(player);
+        events.clear();
+        check(commands.enqueuePending(player, commands.createSpawnCoordinator(
+                (candidateBudget, worldBudget) -> Commands.PendingStep.complete("blocked", 1, 1),
+                () -> TeleportService.LifecycleStatus.CURRENT,
+                value -> Commands.finalCooldownAdmission(cooldowns, player, config, events::add),
+                value -> true, value -> events.add("complete:" + value),
+                status -> events.add("lifecycle:" + status))), "cooldown coordinator enqueued");
+        commands.tick();
+        check(events.size() == 1 && !events.getFirst().startsWith("complete:"),
+                "final cooldown denial sends feedback and suppresses completion");
+
+        events.clear();
+        check(commands.enqueuePending(player, commands.createSpawnCoordinator(
+                (candidateBudget, worldBudget) -> Commands.PendingStep.pending(1, 1),
+                () -> TeleportService.LifecycleStatus.TOO_LARGE,
+                value -> true, value -> true, value -> events.add("complete"),
+                status -> events.add(status == TeleportService.LifecycleStatus.TOO_LARGE
+                        ? Commands.PASSENGER_TREE_TOO_LARGE : "stale"))),
+                "oversized lifecycle coordinator enqueued");
+        commands.tick();
+        check(events.equals(List.of(Commands.PASSENGER_TREE_TOO_LARGE)),
+                "oversized pending lifecycle retires with explicit passenger-cap feedback");
+    }
+
+    private static void admissionAndLifecycleWorkShareHardAggregateAllowances() {
+        int admissionLimit = SpawnDestination.ADMISSION_SNAPSHOT_PROBE_WORK
+                + TeleportService.LIFECYCLE_CAPTURE_WORK;
+        Commands.TickWorkAllowance admission = new Commands.TickWorkAllowance(admissionLimit);
+        check(admission.claim(SpawnDestination.ADMISSION_SNAPSHOT_PROBE_WORK)
+                        && admission.claim(TeleportService.LIFECYCLE_CAPTURE_WORK),
+                "one admission snapshot and one maximum valid lifecycle capture fit the aggregate allowance");
+        check(!admission.claim(1) && admission.remaining() == 0,
+                "another synchronous probe cannot exceed the per-tick aggregate allowance");
+        admission.reset();
+        check(admission.remaining() == admissionLimit,
+                "tick boundary restores exactly the mechanically derived allowance");
+
+        Commands.PendingSearches<Integer, Void> pending = new Commands.PendingSearches<>();
+        AtomicLong lifecycleChecks = new AtomicLong();
+        AtomicLong routeSteps = new AtomicLong();
+        int crowdedRequests = 1_000;
+        for (int request = 0; request < crowdedRequests; request++) {
+            Commands.CoordinatedPending<Void> coordinated = new Commands.CoordinatedPending<>(
+                    (candidateBudget, worldBudget) -> {
+                        routeSteps.incrementAndGet();
+                        return Commands.PendingStep.pending(1, 1);
+                    }, new Commands.CoordinatorHooks<>() {
+                        @Override public TeleportService.LifecycleStatus lifecycleStatus() {
+                            lifecycleChecks.incrementAndGet();
+                            return TeleportService.LifecycleStatus.CURRENT;
+                        }
+                        @Override public void lifecycleRejected(TeleportService.LifecycleStatus status) {
+                            throw new AssertionError("current lifecycle cannot reject");
+                        }
+                        @Override public boolean finalAdmission(Void value) { throw new AssertionError("not complete"); }
+                        @Override public boolean anchorCurrent(Void value) { throw new AssertionError("not complete"); }
+                        @Override public void complete(Void value) { throw new AssertionError("not complete"); }
+                    }, TeleportService.LIFECYCLE_VALIDATION_WORK, TeleportService.COMPLETION_WORK);
+            int id = request;
+            check(pending.add(id, (candidateBudget, worldBudget) ->
+                    coordinated.step(1, candidateBudget, worldBudget)), "crowded coordinated request added");
+        }
+        Commands.PendingTick used = pending.tick(Commands.SEARCH_CANDIDATES_PER_TICK,
+                Commands.PENDING_ADVANCEMENT_WORK_PER_TICK, ignored -> { });
+        check(used.worldWorkUsed() <= Commands.SEARCH_WORLD_WORK_PER_TICK,
+                "crowded lifecycle traversal cannot exceed aggregate per-tick work");
+        check(lifecycleChecks.get() >= routeSteps.get()
+                        && lifecycleChecks.get() - routeSteps.get() <= 1
+                        && routeSteps.get() > 0 && lifecycleChecks.get() < crowdedRequests,
+                "lifecycle accounting bounds a crowded queue and preserves the next round-robin position");
+        long firstTickRoutes = routeSteps.get();
+        pending.tick(Commands.SEARCH_CANDIDATES_PER_TICK,
+                Commands.PENDING_ADVANCEMENT_WORK_PER_TICK, ignored -> { });
+        check(routeSteps.get() > firstTickRoutes && routeSteps.get() < crowdedRequests,
+                "the next crowded slice advances waiting requests before returning to the front");
+    }
+
+    private static void zeroProgressKeepsTheBlockedRequestNext() {
+        Commands.PendingSearches<Integer, Void> pending = new Commands.PendingSearches<>();
+        List<Integer> progressOrder = new ArrayList<>();
+        for (int request = 0; request < 4; request++) {
+            int id = request;
+            Commands.CoordinatedPending<Void> coordinated = new Commands.CoordinatedPending<>(
+                    (candidateBudget, worldBudget) -> {
+                        progressOrder.add(id);
+                        return Commands.PendingStep.pending(1, worldBudget);
+                    }, new Commands.CoordinatorHooks<>() {
+                        @Override public TeleportService.LifecycleStatus lifecycleStatus() {
+                            return TeleportService.LifecycleStatus.CURRENT;
+                        }
+                        @Override public void lifecycleRejected(TeleportService.LifecycleStatus status) {
+                            throw new AssertionError("current lifecycle cannot reject");
+                        }
+                        @Override public boolean finalAdmission(Void value) { throw new AssertionError("not complete"); }
+                        @Override public boolean anchorCurrent(Void value) { throw new AssertionError("not complete"); }
+                        @Override public void complete(Void value) { throw new AssertionError("not complete"); }
+                    }, TeleportService.LIFECYCLE_VALIDATION_WORK, TeleportService.COMPLETION_WORK);
+            check(pending.add(id, (candidateBudget, worldBudget) ->
+                    coordinated.step(id + 1L, candidateBudget, worldBudget)),
+                    "maximum-work fairness request added");
+        }
+        for (int tick = 0; tick < 4; tick++) {
+            pending.tick(Commands.SEARCH_CANDIDATES_PER_TICK,
+                    Commands.PENDING_ADVANCEMENT_WORK_PER_TICK, ignored -> { });
+        }
+        check(progressOrder.subList(0, 4).equals(List.of(0, 1, 2, 3)),
+                "a blocked maximum-work request stays next instead of starving behind alternating peers");
     }
 
     private static void pendingCommandAdmissionCancelsOnlyCompetingTeleports() {

@@ -19,15 +19,15 @@ import java.util.NoSuchElementException;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
 import java.util.function.Function;
-import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 public final class SpawnDestination {
     private static final Logger LOGGER = LoggerFactory.getLogger("omwh");
     static final int HORIZONTAL_BOUND = 48;
     static final int VERTICAL_BOUND = 48;
-    static final int MAX_ROOT_WIDTH = 14;
-    static final int MAX_ROOT_HEIGHT = 16;
+
+    static final int ADMISSION_SNAPSHOT_PROBE_WORK = 64;
+    static final int FINAL_SNAPSHOT_PROBE_WORK = 4;
 
     record Offset(int x, int y, int z) { }
     enum Dimension { OVERWORLD, NETHER, END, OTHER }
@@ -165,18 +165,24 @@ public final class SpawnDestination {
                 double centerOffset = rootWidth % 2 == 0 ? 0.0 : 0.5;
                 destination = DestinationSafety.Prepared.ordinary(level,
                         new Vec3(feet.getX() + centerOffset, feet.getY(), feet.getZ() + centerOffset), yaw, pitch);
-                revalidation = freshProbe.apply(feet);
-                revalidation.begin(new Offset(0, 0, 0), ProbeKind.ROOT);
                 return used;
             }
 
-            ProbeStep checked = revalidation.step(worldWorkBudget);
+            int snapshotWork = 0;
+            if (revalidation == null) {
+                if (worldWorkBudget < FINAL_SNAPSHOT_PROBE_WORK) return new Tick(0, 0);
+                BlockPos feet = BlockPos.containing(destination.position());
+                revalidation = freshProbe.apply(feet);
+                revalidation.begin(new Offset(0, 0, 0), ProbeKind.ROOT);
+                snapshotWork = FINAL_SNAPSHOT_PROBE_WORK;
+            }
+            ProbeStep checked = revalidation.step(worldWorkBudget - snapshotWork);
             if (checked.outcome == ProbeOutcome.REJECTED) {
                 result = new Result(Outcome.UNSAFE, null);
             } else if (checked.outcome == ProbeOutcome.FITS) {
                 result = new Result(Outcome.ACCEPT, destination, true, searchAnchor);
             }
-            return new Tick(0, checked.worldWork);
+            return new Tick(0, snapshotWork + checked.worldWork);
         }
 
         boolean complete() { return result != null; }
@@ -231,7 +237,7 @@ public final class SpawnDestination {
     }
 
     static boolean rootGeometrySupported(int rootWidth, int rootHeight) {
-        return rootWidth <= MAX_ROOT_WIDTH && rootHeight <= MAX_ROOT_HEIGHT;
+        return DestinationSafety.rootGeometrySupported(rootWidth, rootHeight);
     }
 
     static int searchRootWidth(int rootWidth, int rootHeight) {
@@ -285,27 +291,6 @@ public final class SpawnDestination {
         return currentAnchor(spawnData, nether, scale, level.getWorldBorder()::clampToBounds);
     }
 
-    static Selection select(Iterable<Offset> candidates, Predicate<Offset> rootFits,
-                            Predicate<Offset> playerFits) {
-        int visited = 0;
-        int rootChecks = 0;
-        int playerChecks = 0;
-        boolean playerCouldFit = false;
-        for (Offset candidate : candidates) {
-            visited++;
-            rootChecks++;
-            if (rootFits.test(candidate)) {
-                return new Selection(Outcome.ACCEPT, candidate, visited, rootChecks, playerChecks);
-            }
-            if (playerFits != null) {
-                playerChecks++;
-                playerCouldFit |= playerFits.test(candidate);
-            }
-        }
-        return new Selection(playerCouldFit ? Outcome.VEHICLE_TOO_LARGE : Outcome.UNSAFE,
-                null, visited, rootChecks, playerChecks);
-    }
-
     static Start start(Iterator<Offset> candidates, CandidateProbe probe, boolean mounted,
                        DestinationSafety.ChunkResidency residency) {
         if (residency.fullyCold()) {
@@ -315,7 +300,14 @@ public final class SpawnDestination {
     }
 
     static Outcome acceptEnd(boolean force, BooleanSupplier rootFits, BooleanSupplier playerFits) {
-        if (force || rootFits.getAsBoolean()) return Outcome.ACCEPT;
+        return acceptEnd(force, 1, 2, rootFits, playerFits);
+    }
+
+    static Outcome acceptEnd(boolean force, int rootWidth, int rootHeight,
+                             BooleanSupplier rootFits, BooleanSupplier playerFits) {
+        if (force) return Outcome.ACCEPT;
+        if (!rootGeometrySupported(rootWidth, rootHeight)) return Outcome.VEHICLE_TOO_LARGE;
+        if (rootFits.getAsBoolean()) return Outcome.ACCEPT;
         return playerFits != null && playerFits.getAsBoolean()
                 ? Outcome.VEHICLE_TOO_LARGE : Outcome.UNSAFE;
     }
@@ -375,12 +367,13 @@ public final class SpawnDestination {
 
     private static Result findEnd(ServerPlayer player, ServerLevel endLevel, boolean force) {
         Entity root = player.getRootVehicle();
+        DestinationSafety.RootGeometry geometry = DestinationSafety.rootGeometry(root);
         TeleportTransition transition = ((Portal) Blocks.END_PORTAL).getPortalDestination(
                 endLevel.getServer().overworld(), root, BlockPos.ZERO);
         if (transition == null) return new Result(Outcome.NO_WORLD_SPAWN, null);
 
         Vec3 playerPosition = Vec3.atBottomCenterOf(ServerLevel.END_SPAWN_POINT).subtract(0, 1, 0);
-        Outcome outcome = acceptEnd(force,
+        Outcome outcome = acceptEnd(force, geometry.width(), geometry.clearHeight(),
                 () -> DestinationSafety.endFits(transition.newLevel(), root, transition.position()),
                 root == player ? null
                         : () -> DestinationSafety.endFits(transition.newLevel(), player, playerPosition));
