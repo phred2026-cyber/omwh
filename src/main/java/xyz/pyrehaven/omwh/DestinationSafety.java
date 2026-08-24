@@ -1,0 +1,784 @@
+package xyz.pyrehaven.omwh;
+
+import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.TicketType;
+import net.minecraft.server.level.ServerLevel;
+import net.minecraft.world.entity.Entity;
+import net.minecraft.world.entity.EntityDimensions;
+import net.minecraft.world.entity.Pose;
+import net.minecraft.world.level.block.BedBlock;
+import net.minecraft.world.level.block.Block;
+import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
+
+import net.minecraft.world.level.portal.TeleportTransition;
+import net.minecraft.world.level.ChunkPos;
+import net.minecraft.world.level.chunk.LevelChunk;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.shapes.BooleanOp;
+import net.minecraft.world.phys.shapes.CollisionContext;
+import net.minecraft.world.phys.shapes.Shapes;
+
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.function.IntSupplier;
+import java.util.function.LongPredicate;
+
+public final class DestinationSafety {
+    static final double HOME_HORIZONTAL_MARGIN = 0.5;
+    static final double HOME_UPPER_MARGIN = 1.5;
+    static final int MAX_SUPPORTED_ROOT_WIDTH = 14;
+    static final int MAX_SUPPORTED_CLEAR_HEIGHT = 16;
+    static final int DESTINATION_CHUNK_RADIUS = 2;
+    static final int DESTINATION_CHUNK_CAP = (2 * DESTINATION_CHUNK_RADIUS + 1)
+            * (2 * DESTINATION_CHUNK_RADIUS + 1);
+    static final int SPAWN_PREPARATION_CHUNK_CAP = 64;
+    static final int BLOCK_READ_WORK = 1;
+    static final int COLLISION_INTERSECTION_WORK = 8;
+    static final int MAX_PROBE_CELL_WORK = BLOCK_READ_WORK + COLLISION_INTERSECTION_WORK;
+    private static final int MAX_ROOT_BLOCK_WIDTH = MAX_SUPPORTED_ROOT_WIDTH + 1;
+    private static final int MAX_ROOT_BLOCK_HEIGHT = MAX_SUPPORTED_CLEAR_HEIGHT - 1;
+    private static final int MAX_HOME_CLEARANCE_WIDTH = MAX_ROOT_BLOCK_WIDTH + 1;
+    private static final int MAX_HOME_CLEARANCE_HEIGHT = MAX_ROOT_BLOCK_HEIGHT + 2;
+    private static final int MAX_HOME_COLLISION_OWNER_WIDTH = MAX_HOME_CLEARANCE_WIDTH + 2;
+    private static final int MAX_HOME_COLLISION_OWNER_HEIGHT = MAX_HOME_CLEARANCE_HEIGHT + 2;
+    private static final int MAX_HOME_HAZARD_CELLS = MAX_ROOT_BLOCK_WIDTH
+            * (MAX_ROOT_BLOCK_HEIGHT + 1) * MAX_ROOT_BLOCK_WIDTH;
+    private static final int MAX_HOME_COLLISION_CELLS = MAX_HOME_COLLISION_OWNER_WIDTH
+            * MAX_HOME_COLLISION_OWNER_HEIGHT * MAX_HOME_COLLISION_OWNER_WIDTH;
+    private static final int MAX_HOME_CHUNK_PROBES = 3 * 3;
+    private static final int CONFIGURED_BED_READS = 2;
+    static final int MAX_SINGLE_MOUNTED_HOME_SAFETY_WORK = MAX_HOME_CHUNK_PROBES // retained-chunk coverage probes
+            + CONFIGURED_BED_READS * BLOCK_READ_WORK // configured bed-part reads
+            + MAX_HOME_HAZARD_CELLS * BLOCK_READ_WORK // root-space fluid and hazard reads
+            + MAX_HOME_COLLISION_CELLS * (BLOCK_READ_WORK + COLLISION_INTERSECTION_WORK); // clearance reads and shape intersections
+    static final int HOME_POLICY_WORK = 4 * BLOCK_READ_WORK // bed, paired-bed, and cover-state reads
+            + 2 * COLLISION_INTERSECTION_WORK; // two covered-bed shape checks
+    static final int MAX_MOUNTED_HOME_SAFETY_WORK = 2 * MAX_SINGLE_MOUNTED_HOME_SAFETY_WORK // exact and above-bed scans
+            + HOME_POLICY_WORK; // one bed/fallback policy decision
+    private static final int MAX_END_COLLISION_OWNER_WIDTH = MAX_ROOT_BLOCK_WIDTH + 2;
+    private static final int MAX_END_COLLISION_OWNER_HEIGHT = MAX_ROOT_BLOCK_HEIGHT + 2;
+    private static final int MAX_END_OCCUPIED_CELLS = MAX_ROOT_BLOCK_WIDTH
+            * MAX_ROOT_BLOCK_HEIGHT * MAX_ROOT_BLOCK_WIDTH;
+    private static final int MAX_END_COLLISION_CELLS = MAX_END_COLLISION_OWNER_WIDTH
+            * MAX_END_COLLISION_OWNER_HEIGHT * MAX_END_COLLISION_OWNER_WIDTH;
+    private static final int MAX_END_SUPPORT_CELLS = MAX_ROOT_BLOCK_WIDTH * MAX_ROOT_BLOCK_WIDTH;
+    private static final int MAX_END_CHUNK_PROBES = 3 * 3;
+    static final int MAX_SINGLE_END_SAFETY_WORK = MAX_END_CHUNK_PROBES // loaded-only owner-chunk probes
+            + MAX_END_COLLISION_CELLS * (BLOCK_READ_WORK + COLLISION_INTERSECTION_WORK) // collision reads and intersections
+            + MAX_END_OCCUPIED_CELLS * BLOCK_READ_WORK // fluid and hazard reads
+            + MAX_END_SUPPORT_CELLS * (BLOCK_READ_WORK + COLLISION_INTERSECTION_WORK); // support reads and full-block checks
+    static final int MAX_PLAYER_END_SAFETY_WORK = 4 // player owner-chunk probes
+            + 80 * (BLOCK_READ_WORK + COLLISION_INTERSECTION_WORK) // player collision reads and intersections
+            + 12 * BLOCK_READ_WORK // player occupied-space hazard reads
+            + 4 * (BLOCK_READ_WORK + COLLISION_INTERSECTION_WORK); // player support reads and full-block checks
+    static final int MAX_END_SAFETY_WORK = MAX_SINGLE_END_SAFETY_WORK // root placement check
+            + MAX_PLAYER_END_SAFETY_WORK; // mounted player-only diagnostic
+    private static final int MAX_SPAWN_SUPPORT_CELLS = MAX_SUPPORTED_ROOT_WIDTH * MAX_SUPPORTED_ROOT_WIDTH;
+    private static final int MAX_SPAWN_OCCUPIED_CELLS = MAX_SUPPORTED_ROOT_WIDTH
+            * MAX_SUPPORTED_CLEAR_HEIGHT * MAX_SUPPORTED_ROOT_WIDTH;
+    private static final int MAX_SPAWN_COLLISION_CELLS = (MAX_SUPPORTED_ROOT_WIDTH + 2)
+            * (MAX_SUPPORTED_CLEAR_HEIGHT + 2) * (MAX_SUPPORTED_ROOT_WIDTH + 2);
+    static final int MAX_SPAWN_CANDIDATE_WORK = MAX_SPAWN_SUPPORT_CELLS
+            * (BLOCK_READ_WORK + COLLISION_INTERSECTION_WORK) // support reads and full-block checks
+            + MAX_SPAWN_OCCUPIED_CELLS * BLOCK_READ_WORK // occupied-space fluid and hazard reads
+            + MAX_SPAWN_COLLISION_CELLS * (BLOCK_READ_WORK + COLLISION_INTERSECTION_WORK); // owner reads and shape intersections
+
+    record Bounds(double minX, double minY, double minZ, double maxX, double maxY, double maxZ) { }
+    record Footprint(int minX, int maxX, int minZ, int maxZ) { }
+    record CellRange(int minX, int maxX, int minY, int maxY, int minZ, int maxZ) { }
+
+    record RootGeometry(int width, int clearHeight) { }
+    static final class ChunkResidency {
+        private final long[] keys;
+        private final Object[] chunks;
+        private final IntSupplier count;
+
+        ChunkResidency(long[] keys, Object[] chunks, IntSupplier count) {
+            this.keys = keys;
+            this.chunks = chunks;
+            this.count = count;
+        }
+
+        int chunkProbes() { return count.getAsInt(); }
+
+        boolean coversBlockRange(int minBlockX, int maxBlockX, int minBlockZ, int maxBlockZ) {
+            for (int x = chunkCoordinate(minBlockX); x <= chunkCoordinate(maxBlockX); x++) {
+                for (int z = chunkCoordinate(minBlockZ); z <= chunkCoordinate(maxBlockZ); z++) {
+                    if (chunkByKey(chunkKey(x, z)) == null) return false;
+                }
+            }
+            return true;
+        }
+
+        Object chunkAtBlock(int blockX, int blockZ) {
+            return chunkByKey(chunkKey(chunkCoordinate(blockX), chunkCoordinate(blockZ)));
+        }
+
+        private Object chunkByKey(long key) {
+            int currentCount = count.getAsInt();
+            for (int index = 0; index < currentCount; index++) {
+                if (keys[index] == key) return chunks[index];
+            }
+            return null;
+        }
+    }
+    interface TicketAccess {
+        void retain(long chunk);
+        Object load(long chunk);
+        void release(long chunk);
+    }
+
+    private static final class MinecraftTicketAccess implements TicketAccess {
+        private final ServerLevel level;
+        // TicketStorage keys tickets by TicketType identity, so each preparation owns a non-colliding type.
+        private final TicketType type = new TicketType(TicketType.NO_TIMEOUT, TicketType.FLAG_LOADING);
+
+        private MinecraftTicketAccess(ServerLevel level) {
+            this.level = level;
+        }
+
+        @Override
+        public void retain(long chunk) {
+            level.getChunkSource().addTicketWithRadius(type, chunkPos(chunk), 0);
+        }
+
+        @Override
+        public Object load(long chunk) {
+            return level.getChunk((int) (chunk >> 32), (int) chunk);
+        }
+
+        @Override
+        public void release(long chunk) {
+            level.getChunkSource().removeTicketWithRadius(type, chunkPos(chunk), 0);
+        }
+
+        private static ChunkPos chunkPos(long chunk) {
+            return new ChunkPos((int) (chunk >> 32), (int) chunk);
+        }
+    }
+
+    static final class ChunkPreparation implements AutoCloseable {
+        private final long[] keys = new long[SPAWN_PREPARATION_CHUNK_CAP];
+        private final Object[] chunks = new Object[SPAWN_PREPARATION_CHUNK_CAP];
+        private final boolean[] retained = new boolean[SPAWN_PREPARATION_CHUNK_CAP];
+        private final TicketAccess tickets;
+        private final boolean expandable;
+        private int required;
+        private int prepared;
+        private boolean closing;
+        private boolean closed;
+
+        private ChunkPreparation(int minBlockX, int maxBlockX, int minBlockZ, int maxBlockZ,
+                                 TicketAccess tickets) {
+            this.tickets = tickets;
+            this.expandable = false;
+            requireBlockRange(minBlockX, maxBlockX, minBlockZ, maxBlockZ);
+        }
+
+        private ChunkPreparation(TicketAccess tickets) {
+            this.tickets = tickets;
+            this.expandable = true;
+        }
+
+        static ChunkPreparation controlled(int minBlockX, int maxBlockX, int minBlockZ, int maxBlockZ,
+                                           TicketAccess tickets) {
+            return new ChunkPreparation(minBlockX, maxBlockX, minBlockZ, maxBlockZ, tickets);
+        }
+
+        static ChunkPreparation expandableControlled(TicketAccess tickets) {
+            return new ChunkPreparation(tickets);
+        }
+
+        static ChunkPreparation forLevel(ServerLevel level, int minBlockX, int maxBlockX,
+                                         int minBlockZ, int maxBlockZ) {
+            return new ChunkPreparation(minBlockX, maxBlockX, minBlockZ, maxBlockZ,
+                    new MinecraftTicketAccess(level));
+        }
+
+        static ChunkPreparation expandableForLevel(ServerLevel level) {
+            return new ChunkPreparation(new MinecraftTicketAccess(level));
+        }
+
+        static ChunkPreparation forDestination(ServerLevel level, Vec3 position) {
+            int centerX = chunkCoordinate(floor(position.x));
+            int centerZ = chunkCoordinate(floor(position.z));
+            return forLevel(level, (centerX - 2) * 16, (centerX + 3) * 16 - 1,
+                    (centerZ - 2) * 16, (centerZ + 3) * 16 - 1);
+        }
+
+        int prepare(int chunkBudget, int worldWorkBudget) {
+            if (closing) throw new IllegalStateException("terrain preparation is closing");
+            if (chunkBudget <= 0 || worldWorkBudget <= 0) return 0;
+            int loaded = 0;
+            int allowed = Math.min(chunkBudget, worldWorkBudget);
+            while (prepared < required && loaded < allowed) {
+                long key = keys[prepared];
+                Object chunk;
+                try {
+                    tickets.retain(key);
+                    retained[prepared] = true;
+                    chunk = tickets.load(key);
+                    if (chunk == null) throw new IllegalStateException("terrain preparation returned no chunk");
+                } catch (RuntimeException failure) {
+                    try {
+                        close();
+                    } catch (RuntimeException releaseFailure) {
+                        failure.addSuppressed(releaseFailure);
+                    }
+                    throw failure;
+                }
+                chunks[prepared++] = chunk;
+                loaded++;
+            }
+            return loaded;
+        }
+
+        boolean complete() { return prepared == required; }
+
+        boolean expandable() { return expandable; }
+
+        void requireCandidate(BlockPos center, SpawnDestination.Offset offset, int width) {
+            int feetX = center.getX() + offset.x();
+            int feetZ = center.getZ() + offset.z();
+            Footprint footprint = spawnFootprint(feetX, feetZ, width);
+            requireBlockRange(footprint.minX() - 1, footprint.maxX() + 1,
+                    footprint.minZ() - 1, footprint.maxZ() + 1);
+        }
+
+        boolean candidateReady(BlockPos center, SpawnDestination.Offset offset, int width) {
+            int feetX = center.getX() + offset.x();
+            int feetZ = center.getZ() + offset.z();
+            Footprint footprint = spawnFootprint(feetX, feetZ, width);
+            return liveResidency().coversBlockRange(
+                    footprint.minX() - 1, footprint.maxX() + 1,
+                    footprint.minZ() - 1, footprint.maxZ() + 1);
+        }
+
+        void requireTerrainRead(HomeDestination.TerrainRead read) {
+            requireBlockRange(read.minX(), read.maxX(), read.minZ(), read.maxZ());
+        }
+
+        boolean terrainReadReady(HomeDestination.TerrainRead read) {
+            return liveResidency().coversBlockRange(
+                    read.minX(), read.maxX(), read.minZ(), read.maxZ());
+        }
+
+        void requireCollisionOwnerShell(Bounds bounds) {
+            CellRange owners = collisionOwnerCells(bounds);
+            requireBlockRange(owners.minX(), owners.maxX(), owners.minZ(), owners.maxZ());
+        }
+
+        boolean collisionOwnerShellReady(Bounds bounds) {
+            CellRange owners = collisionOwnerCells(bounds);
+            return liveResidency().coversBlockRange(
+                    owners.minX(), owners.maxX(), owners.minZ(), owners.maxZ());
+        }
+
+        private void requireBlockRange(int minBlockX, int maxBlockX, int minBlockZ, int maxBlockZ) {
+            if (closing) throw new IllegalStateException("terrain preparation is closing");
+            for (int x = chunkCoordinate(minBlockX); x <= chunkCoordinate(maxBlockX); x++) {
+                for (int z = chunkCoordinate(minBlockZ); z <= chunkCoordinate(maxBlockZ); z++) {
+                    long key = chunkKey(x, z);
+                    if (indexOf(key) >= 0) continue;
+                    if (required == keys.length) {
+                        throw new IllegalStateException("spawn preparation exceeds the "
+                                + SPAWN_PREPARATION_CHUNK_CAP + "-chunk bound");
+                    }
+                    keys[required++] = key;
+                }
+            }
+        }
+
+        private int indexOf(long key) {
+            for (int index = 0; index < required; index++) if (keys[index] == key) return index;
+            return -1;
+        }
+
+        ChunkResidency residency() {
+            if (closing) throw new IllegalStateException("terrain preparation is closing");
+            if (!complete()) throw new IllegalStateException("terrain preparation is incomplete");
+            return liveResidency();
+        }
+
+        ChunkResidency liveResidency() {
+            if (closing) throw new IllegalStateException("terrain preparation is closing");
+            return new ChunkResidency(keys, chunks, () -> prepared);
+        }
+
+
+        int closeWork() {
+            int work = 0;
+            for (int index = 0; index < required; index++) if (retained[index]) work++;
+            return work;
+        }
+
+        @Override
+        public void close() {
+            if (closed) return;
+            closing = true;
+            RuntimeException failure = null;
+            for (int index = 0; index < required; index++) {
+                if (!retained[index]) continue;
+                long key = keys[index];
+                try {
+                    tickets.release(key);
+                    retained[index] = false;
+                } catch (RuntimeException releaseFailure) {
+                    if (failure == null) failure = releaseFailure;
+                    else failure.addSuppressed(releaseFailure);
+                }
+            }
+            closed = closeWork() == 0;
+            if (failure != null) throw failure;
+        }
+    }
+    record Prepared(TeleportTransition transition, boolean clearVelocity) {
+        Prepared(TeleportTransition transition) {
+            this(transition, false);
+        }
+
+        static Prepared ordinary(ServerLevel level, Vec3 position, float yaw, float pitch) {
+            return new Prepared(new TeleportTransition(
+                    level, position, Vec3.ZERO, yaw, pitch, TeleportTransition.DO_NOTHING), true);
+        }
+
+        ServerLevel level() { return transition.newLevel(); }
+        Vec3 position() { return transition.position(); }
+    }
+    enum HomeFit { FITS, BLOCKED, UNSAFE }
+
+    interface ProbeAccess {
+        int minY();
+        int maxY();
+        boolean withinBorder(double minX, double maxX, double minZ, double maxZ);
+        BlockState blockState(Object capturedChunk, BlockPos position);
+        boolean fullSupport(BlockState state, BlockPos position);
+        boolean collides(BlockState state, BlockPos position,
+                         double minX, double minY, double minZ,
+                         double maxX, double maxY, double maxZ);
+    }
+
+    static final class SpawnProbe implements SpawnDestination.CandidateProbe {
+        private enum Phase { REJECTED, SUPPORT, OCCUPIED, COLLISION, COMPLETE }
+
+        private final ProbeAccess access;
+        private final BlockPos center;
+        private final int rootWidth;
+        private final int rootHeight;
+        private final boolean rootGeometrySupported;
+        private final ChunkResidency residency;
+        private final BlockPos.MutableBlockPos position = new BlockPos.MutableBlockPos();
+        private Phase phase;
+        private int minX;
+        private int maxX;
+        private int minZ;
+        private int maxZ;
+        private int minY;
+        private int maxY;
+        private int x;
+        private int y;
+        private int z;
+
+        static SpawnProbe forLevel(ServerLevel level, BlockPos center, int rootWidth, int rootHeight,
+                                   boolean rootGeometrySupported, ChunkResidency residency) {
+            return new SpawnProbe(new ProbeAccess() {
+                @Override public int minY() { return level.getMinY(); }
+                @Override public int maxY() { return level.getMaxY(); }
+                @Override public boolean withinBorder(double minX, double maxX, double minZ, double maxZ) {
+                    return minX >= level.getWorldBorder().getMinX() && maxX <= level.getWorldBorder().getMaxX()
+                            && minZ >= level.getWorldBorder().getMinZ() && maxZ <= level.getWorldBorder().getMaxZ();
+                }
+                @Override public BlockState blockState(Object capturedChunk, BlockPos position) {
+                    if (!(capturedChunk instanceof LevelChunk chunk)) return null;
+                    return chunk.getBlockState(position);
+                }
+                @Override public boolean fullSupport(BlockState state, BlockPos position) {
+                    return state.isCollisionShapeFullBlock(level, position);
+                }
+                @Override public boolean collides(BlockState state, BlockPos position,
+                                                  double minX, double minY, double minZ,
+                                                  double maxX, double maxY, double maxZ) {
+                    return Shapes.joinIsNotEmpty(
+                            state.getCollisionShape(level, position, CollisionContext.empty()),
+                            Shapes.box(minX - position.getX(), minY - position.getY(), minZ - position.getZ(),
+                                    maxX - position.getX(), maxY - position.getY(), maxZ - position.getZ()),
+                            BooleanOp.AND);
+                }
+            }, center, rootWidth, rootHeight, rootGeometrySupported, residency);
+        }
+
+        SpawnProbe(ProbeAccess access, BlockPos center, int rootWidth, int rootHeight,
+                   boolean rootGeometrySupported, ChunkResidency residency) {
+            this.access = access;
+            this.center = center;
+            this.rootWidth = rootWidth;
+            this.rootHeight = rootHeight;
+            this.rootGeometrySupported = rootGeometrySupported;
+            this.residency = residency;
+        }
+
+
+        @Override
+        public void begin(SpawnDestination.Offset offset, SpawnDestination.ProbeKind kind) {
+            if (kind == SpawnDestination.ProbeKind.ROOT && !rootGeometrySupported) {
+                phase = Phase.REJECTED;
+                return;
+            }
+            int width = kind == SpawnDestination.ProbeKind.ROOT ? rootWidth : 1;
+            int height = kind == SpawnDestination.ProbeKind.ROOT ? rootHeight : 2;
+            int feetX = center.getX() + offset.x();
+            int feetY = center.getY() + offset.y();
+            int feetZ = center.getZ() + offset.z();
+            Footprint footprint = spawnFootprint(feetX, feetZ, width);
+            minX = footprint.minX();
+            maxX = footprint.maxX();
+            minZ = footprint.minZ();
+            maxZ = footprint.maxZ();
+            minY = feetY;
+            maxY = feetY + height - 1;
+
+            double occupiedMaxX = maxX + 1.0;
+            double occupiedMaxZ = maxZ + 1.0;
+            boolean inBorder = access.withinBorder(minX, occupiedMaxX, minZ, occupiedMaxZ);
+            if (minY < access.minY() || maxY + 1.0 > access.maxY() + 1.0 || !inBorder
+                    || !residency.coversBlockRange(minX - 1, maxX + 1, minZ - 1, maxZ + 1)) {
+                phase = Phase.REJECTED;
+                return;
+            }
+            phase = Phase.SUPPORT;
+            x = minX;
+            z = minZ;
+            y = minY;
+        }
+
+        @Override
+        public SpawnDestination.ProbeStep step(int availableWorldWork) {
+            int used = 0;
+            while (used < availableWorldWork) {
+                if (phase == Phase.REJECTED) {
+                    return new SpawnDestination.ProbeStep(SpawnDestination.ProbeOutcome.REJECTED, used);
+                }
+                if (phase == Phase.COMPLETE) {
+                    return new SpawnDestination.ProbeStep(SpawnDestination.ProbeOutcome.FITS, used);
+                }
+                int requiredWork = BLOCK_READ_WORK
+                        + (phase == Phase.SUPPORT || phase == Phase.COLLISION ? COLLISION_INTERSECTION_WORK : 0);
+                if (availableWorldWork - used < requiredWork) break;
+                position.set(x, phase == Phase.SUPPORT ? minY - 1 : y, z);
+                Object captured = residency.chunkAtBlock(x, z);
+                if (captured == null) {
+                    phase = Phase.REJECTED;
+                    continue;
+                }
+                BlockState state = access.blockState(captured, position);
+                if (state == null) {
+                    phase = Phase.REJECTED;
+                    continue;
+                }
+                used += requiredWork;
+                if (phase == Phase.SUPPORT) {
+                    if (!state.getFluidState().isEmpty()
+                            || !access.fullSupport(state, position)
+                            || isHazard(state.getBlock())) phase = Phase.REJECTED;
+                    else advanceSupport();
+                } else if (phase == Phase.OCCUPIED) {
+                    if (!state.getFluidState().isEmpty() || isHazard(state.getBlock())) phase = Phase.REJECTED;
+                    else advanceOccupied();
+                } else {
+                    if (access.collides(state, position, minX, minY, minZ,
+                            maxX + 1.0, maxY + 1.0, maxZ + 1.0)) phase = Phase.REJECTED;
+                    else advanceCollision();
+                }
+            }
+            if (phase == Phase.REJECTED) return new SpawnDestination.ProbeStep(
+                    SpawnDestination.ProbeOutcome.REJECTED, used);
+            if (phase == Phase.COMPLETE) return new SpawnDestination.ProbeStep(
+                    SpawnDestination.ProbeOutcome.FITS, used);
+            return new SpawnDestination.ProbeStep(SpawnDestination.ProbeOutcome.INCOMPLETE, used);
+        }
+
+        private void advanceSupport() {
+            if (++z <= maxZ) return;
+            z = minZ;
+            if (++x <= maxX) return;
+            phase = Phase.OCCUPIED;
+            x = minX;
+            y = minY;
+        }
+
+        private void advanceOccupied() {
+            if (++y <= maxY) return;
+            y = minY;
+            if (++z <= maxZ) return;
+            z = minZ;
+            if (++x <= maxX) return;
+            phase = Phase.COLLISION;
+            x = minX - 1;
+            y = minY - 1;
+            z = minZ - 1;
+        }
+
+        private void advanceCollision() {
+            if (++z <= maxZ + 1) return;
+            z = minZ - 1;
+            if (++y <= maxY + 1) return;
+            y = minY - 1;
+            if (++x <= maxX + 1) return;
+            phase = Phase.COMPLETE;
+        }
+    }
+
+    private DestinationSafety() { }
+
+    static Bounds mountedHomeClearance(Bounds root) {
+        return new Bounds(root.minX - HOME_HORIZONTAL_MARGIN, root.minY,
+                root.minZ - HOME_HORIZONTAL_MARGIN, root.maxX + HOME_HORIZONTAL_MARGIN,
+                root.maxY + HOME_UPPER_MARGIN, root.maxZ + HOME_HORIZONTAL_MARGIN);
+    }
+
+    static RootGeometry rootGeometry(Entity root) {
+        return new RootGeometry((int) Math.max(1, Math.ceil(root.getBbWidth())),
+                (int) Math.max(3, Math.ceil(root.getBbHeight()) + 2));
+    }
+
+    static RootGeometry rootGeometry(Entity root, boolean unmountedPlayer) {
+        return unmountedPlayer ? new RootGeometry(1, 2) : rootGeometry(root);
+    }
+
+    static boolean rootGeometrySupported(int width, int clearHeight) {
+        return width <= MAX_SUPPORTED_ROOT_WIDTH && clearHeight <= MAX_SUPPORTED_CLEAR_HEIGHT;
+    }
+
+    static boolean blocksMountedHome(Bounds root, Bounds clearance, Bounds obstacle, boolean configuredBedPart) {
+        if (intersects(root, obstacle)) return true;
+        return !configuredBedPart && intersects(clearance, obstacle);
+    }
+
+    static Footprint footprint(double centerX, double centerZ, double width) {
+        if (!(width > 0)) throw new IllegalArgumentException("width must be positive");
+        double half = width / 2.0;
+        return new Footprint(floor(centerX - half), floor(Math.nextDown(centerX + half)),
+                floor(centerZ - half), floor(Math.nextDown(centerZ + half)));
+    }
+
+    static Footprint spawnFootprint(int feetX, int feetZ, int width) {
+        double centerOffset = width % 2 == 0 ? 0.0 : 0.5;
+        return footprint(feetX + centerOffset, feetZ + centerOffset, width);
+    }
+
+    static double spawnCenter(int feetCoordinate, int width) {
+        return feetCoordinate + (width % 2 == 0 ? 0.0 : 0.5);
+    }
+
+    static CellRange collisionOwnerCells(Bounds occupied) {
+        return new CellRange(floor(occupied.minX) - 1, floor(Math.nextDown(occupied.maxX)) + 1,
+                floor(occupied.minY) - 1, floor(Math.nextDown(occupied.maxY)) + 1,
+                floor(occupied.minZ) - 1, floor(Math.nextDown(occupied.maxZ)) + 1);
+    }
+
+    static Set<Long> involvedChunks(CellRange cells) {
+        Set<Long> chunks = new LinkedHashSet<>();
+        for (int x = chunkCoordinate(cells.minX); x <= chunkCoordinate(cells.maxX); x++) {
+            for (int z = chunkCoordinate(cells.minZ); z <= chunkCoordinate(cells.maxZ); z++) {
+                chunks.add(chunkKey(x, z));
+            }
+        }
+        return Set.copyOf(chunks);
+    }
+
+
+    static boolean allChunksLoaded(CellRange cells, LongPredicate loaded) {
+        for (long chunk : involvedChunks(cells)) {
+            if (!loaded.test(chunk)) return false;
+        }
+        return true;
+    }
+
+
+    static boolean isHazard(Block block) {
+        return block == Blocks.FIRE || block == Blocks.SOUL_FIRE || block == Blocks.LAVA
+                || block == Blocks.MAGMA_BLOCK || block == Blocks.CACTUS
+                || block == Blocks.SWEET_BERRY_BUSH || block == Blocks.WITHER_ROSE
+                || block == Blocks.POWDER_SNOW;
+    }
+
+    static boolean isUnsafeCell(boolean hasFluid, Block block) {
+        return hasFluid || isHazard(block);
+    }
+
+    static CellRange homeHazardCells(Bounds occupied) {
+        return new CellRange(floor(occupied.minX), floor(Math.nextDown(occupied.maxX)),
+                floor(occupied.minY) - 1, floor(Math.nextDown(occupied.maxY)),
+                floor(occupied.minZ), floor(Math.nextDown(occupied.maxZ)));
+    }
+
+    static boolean unmountedHomeFits(Entity player, ServerLevel level, Vec3 position) {
+        Bounds occupied = standingPlayerBounds(position, player.getDimensions(Pose.STANDING));
+        AABB occupiedBox = box(occupied);
+        if (!withinBuildHeight(occupied, level.getMinY(), level.getMaxY())
+                || !level.getWorldBorder().isWithinBounds(occupiedBox)) return false;
+
+        return !containsHomeHazard(level, homeHazardCells(occupied));
+    }
+
+    static Bounds standingPlayerBounds(Vec3 position, EntityDimensions standingDimensions) {
+        return bounds(standingDimensions.makeBoundingBox(position));
+    }
+
+    static HomeFit mountedHomeFit(Entity root, ServerLevel level, Vec3 position, BlockPos homeBlock) {
+        AABB rootBox = root.getBoundingBox().move(position.subtract(root.position()));
+        Bounds rootBounds = bounds(rootBox);
+        Bounds clearance = mountedHomeClearance(rootBounds);
+        AABB clearanceBox = box(clearance);
+        if (!withinBuildHeight(rootBounds, level.getMinY(), level.getMaxY())
+                || !level.getWorldBorder().isWithinBounds(rootBox)
+                || !level.getWorldBorder().isWithinBounds(clearanceBox)) return HomeFit.BLOCKED;
+
+        CellRange owners = collisionOwnerCells(clearance);
+        if (containsHomeHazard(level, homeHazardCells(rootBounds))) return HomeFit.UNSAFE;
+        ConfiguredBed configuredBed = configuredBed(level, homeBlock);
+        CollisionContext context = CollisionContext.of(root);
+        for (int x = owners.minX; x <= owners.maxX; x++) {
+            for (int y = owners.minY; y <= owners.maxY; y++) {
+                for (int z = owners.minZ; z <= owners.maxZ; z++) {
+                    BlockPos blockPos = new BlockPos(x, y, z);
+                    var state = level.getBlockState(blockPos);
+                    boolean bedPart = configuredBed.contains(blockPos);
+                    AABB checked = bedPart ? rootBox : clearanceBox;
+                    if (Shapes.joinIsNotEmpty(
+                            state.getCollisionShape(level, blockPos, context),
+                            Shapes.box(checked.minX - x, checked.minY - y, checked.minZ - z,
+                                    checked.maxX - x, checked.maxY - y, checked.maxZ - z),
+                            BooleanOp.AND)) return HomeFit.BLOCKED;
+                }
+            }
+        }
+        return HomeFit.FITS;
+    }
+
+    private static boolean containsHomeHazard(ServerLevel level, CellRange checked) {
+        for (int x = checked.minX; x <= checked.maxX; x++) {
+            for (int y = checked.minY; y <= checked.maxY; y++) {
+                for (int z = checked.minZ; z <= checked.maxZ; z++) {
+                    BlockPos blockPos = new BlockPos(x, y, z);
+                    var state = level.getBlockState(blockPos);
+                    if (isUnsafeCell(!state.getFluidState().isEmpty(), state.getBlock())) return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    static boolean endFits(ServerLevel level, Entity entity, Vec3 position) {
+        AABB occupiedBox = entity.getBoundingBox().move(position.subtract(entity.position()));
+        Bounds occupied = bounds(occupiedBox);
+        if (!withinBuildHeight(occupied, level.getMinY(), level.getMaxY())
+                || !level.getWorldBorder().isWithinBounds(occupiedBox)) return false;
+
+        CollisionContext context = CollisionContext.of(entity);
+        CellRange owners = collisionOwnerCells(occupied);
+        if (!allChunksLoaded(owners, chunk -> level.getChunkSource().getChunkNow(
+                (int) (chunk >> 32), (int) chunk) != null)) return false;
+        for (int x = owners.minX; x <= owners.maxX; x++) {
+            for (int y = owners.minY; y <= owners.maxY; y++) {
+                for (int z = owners.minZ; z <= owners.maxZ; z++) {
+                    BlockPos blockPos = new BlockPos(x, y, z);
+                    BlockState state = level.getBlockState(blockPos);
+                    if (Shapes.joinIsNotEmpty(
+                            state.getCollisionShape(level, blockPos, context),
+                            Shapes.box(occupied.minX - x, occupied.minY - y, occupied.minZ - z,
+                                    occupied.maxX - x, occupied.maxY - y, occupied.maxZ - z),
+                            BooleanOp.AND)) return false;
+                }
+            }
+        }
+        for (int x = floor(occupied.minX); x <= floor(Math.nextDown(occupied.maxX)); x++) {
+            for (int y = floor(occupied.minY); y <= floor(Math.nextDown(occupied.maxY)); y++) {
+                for (int z = floor(occupied.minZ); z <= floor(Math.nextDown(occupied.maxZ)); z++) {
+                    var state = level.getBlockState(new BlockPos(x, y, z));
+                    if (isUnsafeCell(!state.getFluidState().isEmpty(), state.getBlock())) return false;
+                }
+            }
+        }
+        int supportY = floor(occupied.minY) - 1;
+        for (int x = floor(occupied.minX); x <= floor(Math.nextDown(occupied.maxX)); x++) {
+            for (int z = floor(occupied.minZ); z <= floor(Math.nextDown(occupied.maxZ)); z++) {
+                BlockPos supportPos = new BlockPos(x, supportY, z);
+                var support = level.getBlockState(supportPos);
+                if (!support.getFluidState().isEmpty()
+                        || !support.isCollisionShapeFullBlock(level, supportPos)
+                        || isHazard(support.getBlock())) return false;
+            }
+        }
+        return true;
+    }
+
+    static void loadDestinationChunks(ServerLevel level, Vec3 position) {
+        for (long chunk : destinationChunks(position.x, position.z)) loadChunk(level, chunk);
+    }
+
+    static List<Long> destinationChunks(double feetX, double feetZ) {
+        int centerX = chunkCoordinate(floor(feetX));
+        int centerZ = chunkCoordinate(floor(feetZ));
+        List<Long> chunks = new ArrayList<>(DESTINATION_CHUNK_CAP);
+        for (int x = centerX - DESTINATION_CHUNK_RADIUS; x <= centerX + DESTINATION_CHUNK_RADIUS; x++) {
+            for (int z = centerZ - DESTINATION_CHUNK_RADIUS; z <= centerZ + DESTINATION_CHUNK_RADIUS; z++) {
+                chunks.add(chunkKey(x, z));
+            }
+        }
+        return List.copyOf(chunks);
+    }
+
+    static long chunkKey(int x, int z) { return ((long) x << 32) ^ (z & 0xffffffffL); }
+
+    static boolean withinBuildHeight(Bounds box, int minY, int maxY) {
+        return box.minY >= minY && box.maxY <= (double) maxY + 1.0;
+    }
+
+    private static int chunkCoordinate(int blockCoordinate) {
+        return Math.floorDiv(blockCoordinate, 16);
+    }
+
+    static void loadChunk(ServerLevel level, long chunk) {
+        level.getChunk((int) (chunk >> 32), (int) chunk);
+    }
+
+
+    private record ConfiguredBed(BlockPos primary, BlockPos secondary) {
+        boolean contains(BlockPos candidate) {
+            return candidate.equals(primary) || secondary != null && candidate.equals(secondary);
+        }
+    }
+
+    private static ConfiguredBed configuredBed(ServerLevel level, BlockPos homeBlock) {
+        var homeState = level.getBlockState(homeBlock);
+        if (!(homeState.getBlock() instanceof BedBlock)) return new ConfiguredBed(null, null);
+        BlockPos other = homeBlock.relative(BedBlock.getConnectedDirection(homeState));
+        return new ConfiguredBed(homeBlock,
+                level.getBlockState(other).getBlock() instanceof BedBlock ? other : null);
+    }
+
+    static Bounds boundsAt(Entity entity, Vec3 position) {
+        return bounds(entity.getBoundingBox().move(position.subtract(entity.position())));
+    }
+
+    private static Bounds bounds(AABB box) {
+        return new Bounds(box.minX, box.minY, box.minZ, box.maxX, box.maxY, box.maxZ);
+    }
+
+    private static AABB box(Bounds bounds) {
+        return new AABB(bounds.minX, bounds.minY, bounds.minZ,
+                bounds.maxX, bounds.maxY, bounds.maxZ);
+    }
+
+    private static boolean intersects(Bounds a, Bounds b) {
+        return b.maxX > a.minX && b.minX < a.maxX && b.maxY > a.minY && b.minY < a.maxY
+                && b.maxZ > a.minZ && b.minZ < a.maxZ;
+    }
+
+    private static int floor(double value) { return (int) Math.floor(value); }
+}

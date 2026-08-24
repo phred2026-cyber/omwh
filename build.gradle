@@ -50,12 +50,23 @@ sourceSets {
 	}
 }
 
-tasks.register('regressionTest', JavaExec) {
+['configTest': 'ConfigTest',
+ 'commandsAndCooldownsTest': 'CommandsAndCooldownsTest',
+ 'destinationsTest': 'DestinationsTest',
+ 'teleportServiceTest': 'TeleportServiceTest'].each { taskName, className ->
+	tasks.register(taskName, JavaExec) {
+		group = 'verification'
+		dependsOn testClasses
+		classpath = sourceSets.test.runtimeClasspath
+		mainClass = "xyz.pyrehaven.omwh.${className}"
+		workingDir = layout.buildDirectory.dir("test-runs/${taskName}")
+		doFirst { workingDir.mkdirs() }
+	}
+}
+
+tasks.register('regressionTest') {
 	group = 'verification'
-	description = 'Runs deterministic OMWH regression tests without a test framework dependency.'
-	dependsOn testClasses
-	classpath = sourceSets.test.runtimeClasspath
-	mainClass = 'com.omwh.utils.RegressionTestSuite'
+	dependsOn configTest, commandsAndCooldownsTest, destinationsTest, teleportServiceTest
 }
 
 check.dependsOn regressionTest
@@ -73,6 +84,7 @@ dependencies {
 	modImplementation "net.fabricmc.fabric-api:fabric-lifecycle-events-v1:4.1.3+4575b05f9c"
 	modImplementation "net.fabricmc.fabric-api:fabric-networking-api-v1:6.3.3+72073ef09c"
 	modImplementation "net.fabricmc.fabric-api:fabric-api-base:2.0.4+ece063239c"
+	modLocalRuntime "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
 }
 
 processResources {

@@ -3,7 +3,8 @@
   "id": "omwh",
   "version": "${version}",
   "name": "OMWH",
-  "description": "Adds same-dimension /home and /spawn commands with configurable cooldowns, messages, aliases, effects, and mounted teleport support.",
+  "description": "On My Way Home adds server-side /home and /spawn commands that use Minecraft's saved-home and world-spawn destinations and bring mounted groups with you.",
+  "license": "CC0-1.0",
   "authors": [
     "PyreHaven"
   ],
@@ -16,13 +17,9 @@
   "environment": "*",
   "entrypoints": {
     "main": [
-      "com.omwh.OMWH"
+      "xyz.pyrehaven.omwh.Omwh"
     ]
   },
-  "mixins": [
-    "omwh.mixins.json"
-  ],
-  "accessWidener": "omwh.accesswidener",
   "depends": {
     "fabricloader": ">=0.19.3",
     "minecraft": "~26.2",

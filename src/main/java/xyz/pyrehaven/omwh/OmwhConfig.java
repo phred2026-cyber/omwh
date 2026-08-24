@@ -1,0 +1,208 @@
+package xyz.pyrehaven.omwh;
+
+import com.google.gson.Gson;
+import com.google.gson.GsonBuilder;
+import com.google.gson.JsonElement;
+import com.google.gson.JsonObject;
+import com.google.gson.JsonParseException;
+import com.google.gson.JsonParser;
+import net.fabricmc.loader.api.FabricLoader;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+
+import java.io.IOException;
+import java.io.Reader;
+import java.io.Writer;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
+import java.nio.file.Files;
+import java.nio.file.Path;
+
+public final class OmwhConfig {
+    private static final Logger LOGGER = LoggerFactory.getLogger("omwh");
+    private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
+    public String homeCommand = "home";
+    public String spawnCommand = "spawn";
+    public boolean enableRegularCooldown = true;
+    public int regularCooldownSeconds = 30;
+    public boolean enablePvpCooldown = true;
+    public int pvpCooldownSeconds = 45;
+    public boolean enableDamageCooldown = true;
+    public int damageCooldownSeconds = 10;
+    public int joinCooldownSeconds = 30;
+    public boolean playTeleportSound = true;
+    public boolean spawnTeleportParticles = true;
+    public boolean enableForceOverride = true;
+    public boolean enableCrossDimensionTeleport = true;
+    public boolean enableOverworldSpawn = true;
+    public boolean enableNetherSpawn = false;
+    public boolean enableEndSpawn = false;
+    public boolean enableModdedDimensionSpawn = false;
+    public String homeSuccessMessage = "§aTeleported to your home!";
+    public String spawnSuccessMessage = "§aTeleported to world spawn!";
+    public String noHomepointMessage = "§cYou don't have a home yet! Sleep in a bed or charge a respawn anchor first.";
+    public String crossDimensionMessage = "§cYou are not powerful enough to bend space between dimensions. Use a portal first, then try again!";
+    public String unsafeHomeMessage = "§cIt is not safe to teleport here.{forceGuidance}";
+    public String unsafeSpawnMessage = "§cIt is not safe to teleport here.{forceGuidance}";
+    public String pvpCooldownMessage = "§cYou were recently in combat! Please wait {time} seconds before teleporting.";
+    public String damageCooldownMessage = "§cYou recently took damage! Please wait {time} seconds before teleporting.";
+    public String joinCooldownMessage = "§cYou must wait {time} seconds after joining before teleporting!";
+    public String regularCooldownMessage = "§cYou recently teleported! Please wait {time} seconds before trying again.";
+    public String internalErrorMessage = "§cSomething went wrong with /{command}. Please let a server admin know.";
+    public String vehicleTooLargeMessage = "§cYour vehicle is too big. Dismount and try again.{forceGuidance}";
+    public String forceGuidanceMessage = "\n§eUse /{command} force to teleport anyway.";
+    public String partialTeleportMessage = "§eCheck your group — some passengers may not have made the trip.";
+    public String spawnDisabledMessage = "§cSpawn teleporting is disabled for this dimension.";
+    public String spawnPendingMessage = "§eA /{command} safety search is already in progress.";
+    public String spawnAnchorChangedMessage = "§cWorld spawn changed while OMWH was checking safety. Please try /{command} again.";
+    public String busyMessage = "§cOMWH is busy right now. Please try /{command} again.";
+    public String passengerTreeTooLargeMessage = "§cYour passenger group is too large for OMWH to teleport safely.";
+    public String currentWorldUnavailableMessage = "§cCannot determine your current world.";
+    public String worldSpawnUnavailableMessage = "§cCannot determine world spawn.";
+    public String passengerNotificationMessage = "§e{player} teleported you with their vehicle to {destination}.";
+    public String homePassengerDestination = "their home";
+    public String spawnPassengerDestination = "spawn";
+
+    public static OmwhConfig load() {
+        return load(FabricLoader.getInstance().getConfigDir().resolve("omwh.json"));
+    }
+
+    static OmwhConfig load(Path path) {
+        if (!Files.exists(path)) {
+            OmwhConfig defaults = new OmwhConfig();
+            defaults.validate();
+            try {
+                Path parent = path.getParent();
+                if (parent != null) Files.createDirectories(parent);
+                try (Writer writer = Files.newBufferedWriter(path)) {
+                    GSON.toJson(defaults, writer);
+                }
+            } catch (IOException exception) {
+                LOGGER.error("Could not write initial OMWH config {}; using defaults", path, exception);
+            }
+            return defaults;
+        }
+
+        if (!Files.isRegularFile(path)) {
+            LOGGER.error("Could not read OMWH config {}; using defaults for this server run", path);
+            return new OmwhConfig();
+        }
+        try (Reader reader = Files.newBufferedReader(path)) {
+            JsonElement parsed = JsonParser.parseReader(reader);
+            if (parsed.isJsonNull()) {
+                LOGGER.error("OMWH config {} is empty; using defaults for this server run", path);
+                return new OmwhConfig();
+            }
+            if (!parsed.isJsonObject()) throw new JsonParseException("config root must be an object");
+            JsonObject object = parsed.getAsJsonObject();
+            requirePrimitiveTypes(object);
+            OmwhConfig loaded = GSON.fromJson(object, OmwhConfig.class);
+            loaded.validate();
+            return loaded;
+        } catch (JsonParseException exception) {
+            throw new IllegalStateException("Cannot parse OMWH config " + path, exception);
+        } catch (IOException exception) {
+            LOGGER.error("Could not read OMWH config {}; using defaults for this server run", path, exception);
+            return new OmwhConfig();
+        }
+    }
+
+    private static void requirePrimitiveTypes(JsonObject object) {
+        requirePrimitiveTypes(object, OmwhConfig.class);
+    }
+
+    static void requirePrimitiveTypes(JsonObject object, Class<?> configType) {
+        for (Field field : configType.getFields()) {
+            int modifiers = field.getModifiers();
+            if (Modifier.isStatic(modifiers) || Modifier.isTransient(modifiers)) continue;
+            Type type = switch (field.getType().getName()) {
+                case "java.lang.String" -> Type.STRING;
+                case "boolean" -> Type.BOOLEAN;
+                case "int" -> Type.INTEGER;
+                default -> throw new JsonParseException(
+                        field.getName() + " has unsupported persisted config type " + field.getType().getTypeName());
+            };
+            requireType(object, field.getName(), type);
+        }
+    }
+
+    private static void requireType(JsonObject object, String field, Type type) {
+        if (!object.has(field)) return;
+        JsonElement value = object.get(field);
+        boolean valid = value != null && value.isJsonPrimitive() && switch (type) {
+            case STRING -> value.getAsJsonPrimitive().isString();
+            case BOOLEAN -> value.getAsJsonPrimitive().isBoolean();
+            case INTEGER -> isInteger(value);
+        };
+        if (!valid) throw new JsonParseException(field + " must be a JSON " + type.label);
+    }
+
+    private static boolean isInteger(JsonElement value) {
+        if (!value.getAsJsonPrimitive().isNumber()) return false;
+        try {
+            value.getAsBigDecimal().intValueExact();
+            return true;
+        } catch (ArithmeticException exception) {
+            return false;
+        }
+    }
+
+    private enum Type {
+        STRING("string"), BOOLEAN("boolean"), INTEGER("integer");
+
+        private final String label;
+
+        Type(String label) {
+            this.label = label;
+        }
+    }
+
+    void validate() {
+        requireLiteral(homeCommand, "homeCommand");
+        requireLiteral(spawnCommand, "spawnCommand");
+        if (homeCommand.equals(spawnCommand)) {
+            throw new IllegalArgumentException("homeCommand and spawnCommand must be distinct");
+        }
+        if (regularCooldownSeconds < 0 || pvpCooldownSeconds < 0
+                || damageCooldownSeconds < 0 || joinCooldownSeconds < 0) {
+            throw new IllegalArgumentException("cooldown durations must be nonnegative");
+        }
+        requireMessage(homeSuccessMessage, "homeSuccessMessage");
+        requireMessage(spawnSuccessMessage, "spawnSuccessMessage");
+        requireMessage(noHomepointMessage, "noHomepointMessage");
+        requireMessage(crossDimensionMessage, "crossDimensionMessage");
+        requireMessage(unsafeHomeMessage, "unsafeHomeMessage");
+        requireMessage(unsafeSpawnMessage, "unsafeSpawnMessage");
+        requireMessage(pvpCooldownMessage, "pvpCooldownMessage");
+        requireMessage(damageCooldownMessage, "damageCooldownMessage");
+        requireMessage(joinCooldownMessage, "joinCooldownMessage");
+        requireMessage(regularCooldownMessage, "regularCooldownMessage");
+        requireMessage(internalErrorMessage, "internalErrorMessage");
+        requireMessage(vehicleTooLargeMessage, "vehicleTooLargeMessage");
+        requireMessage(forceGuidanceMessage, "forceGuidanceMessage");
+        requireMessage(partialTeleportMessage, "partialTeleportMessage");
+        requireMessage(spawnDisabledMessage, "spawnDisabledMessage");
+        requireMessage(spawnPendingMessage, "spawnPendingMessage");
+        requireMessage(spawnAnchorChangedMessage, "spawnAnchorChangedMessage");
+        requireMessage(busyMessage, "busyMessage");
+        requireMessage(passengerTreeTooLargeMessage, "passengerTreeTooLargeMessage");
+        requireMessage(currentWorldUnavailableMessage, "currentWorldUnavailableMessage");
+        requireMessage(worldSpawnUnavailableMessage, "worldSpawnUnavailableMessage");
+        requireMessage(passengerNotificationMessage, "passengerNotificationMessage");
+        requireMessage(homePassengerDestination, "homePassengerDestination");
+        requireMessage(spawnPassengerDestination, "spawnPassengerDestination");
+        if (forceGuidanceMessage.contains("{forceGuidance}")) {
+            throw new IllegalArgumentException("forceGuidanceMessage must not contain {forceGuidance}");
+        }
+    }
+
+    private static void requireLiteral(String value, String field) {
+        if (value == null || !value.matches("[0-9A-Za-z_.+\\-]+")) {
+            throw new IllegalArgumentException(field + " must be a nonblank Brigadier literal");
+        }
+    }
+
+    private static void requireMessage(String value, String field) {
+        if (value == null) throw new IllegalArgumentException(field + " must not be null");
+    }
+}
