@@ -1,6 +1,7 @@
 package xyz.pyrehaven.omwh;
 
 import net.minecraft.core.BlockPos;
+import net.minecraft.server.level.TicketType;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityDimensions;
@@ -11,6 +12,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.portal.TeleportTransition;
+import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
@@ -34,6 +36,7 @@ public final class DestinationSafety {
     static final int MAX_SUPPORTED_ROOT_WIDTH = 14;
     static final int MAX_SUPPORTED_CLEAR_HEIGHT = 16;
     static final int DESTINATION_CHUNK_CAP = 5 * 5;
+    static final int SPAWN_PREPARATION_CHUNK_CAP = 64;
     private static final int BLOCK_READ_WORK = 1;
     private static final int COLLISION_INTERSECTION_WORK = 8;
     private static final int MAX_ROOT_BLOCK_WIDTH = MAX_SUPPORTED_ROOT_WIDTH + 1;
@@ -93,17 +96,15 @@ public final class DestinationSafety {
         private final int depth;
         private final Object[] chunks;
         private final int chunkProbes;
-        private final int residentCount;
 
         private ChunkResidency(int minChunkX, int minChunkZ, int width, int depth,
-                               Object[] chunks, int chunkProbes, int residentCount) {
+                               Object[] chunks, int chunkProbes) {
             this.minChunkX = minChunkX;
             this.minChunkZ = minChunkZ;
             this.width = width;
             this.depth = depth;
             this.chunks = chunks;
             this.chunkProbes = chunkProbes;
-            this.residentCount = residentCount;
         }
 
         static ChunkResidency capture(int minBlockX, int maxBlockX, int minBlockZ, int maxBlockZ,
@@ -122,20 +123,17 @@ public final class DestinationSafety {
             int depth = maxChunkZ - minChunkZ + 1;
             Object[] chunks = new Object[Math.multiplyExact(width, depth)];
             int probes = 0;
-            int residentCount = 0;
             for (int x = minChunkX; x <= maxChunkX; x++) {
                 for (int z = minChunkZ; z <= maxChunkZ; z++) {
                     Object chunk = loader.apply(chunkKey(x, z));
                     chunks[(x - minChunkX) * depth + z - minChunkZ] = chunk;
                     probes++;
-                    if (chunk != null) residentCount++;
                 }
             }
             return new ChunkResidency(minChunkX, minChunkZ, width, depth,
-                    chunks, probes, residentCount);
+                    chunks, probes);
         }
 
-        boolean fullyCold() { return residentCount == 0; }
         int chunkProbes() { return chunkProbes; }
 
         boolean coversBlockRange(int minBlockX, int maxBlockX, int minBlockZ, int maxBlockZ) {
@@ -159,6 +157,163 @@ public final class DestinationSafety {
             if (chunkX < minChunkX || chunkX >= minChunkX + width
                     || chunkZ < minChunkZ || chunkZ >= minChunkZ + depth) return null;
             return chunks[(chunkX - minChunkX) * depth + chunkZ - minChunkZ];
+        }
+    }
+    interface TicketAccess {
+        void retain(long chunk);
+        Object load(long chunk);
+        void release(long chunk);
+    }
+
+    private static final class MinecraftTicketAccess implements TicketAccess {
+        private final ServerLevel level;
+        // TicketStorage keys tickets by TicketType identity, so each preparation owns a non-colliding type.
+        private final TicketType type = new TicketType(TicketType.NO_TIMEOUT, TicketType.FLAG_LOADING);
+
+        private MinecraftTicketAccess(ServerLevel level) {
+            this.level = level;
+        }
+
+        @Override
+        public void retain(long chunk) {
+            level.getChunkSource().addTicketWithRadius(type, chunkPos(chunk), 0);
+        }
+
+        @Override
+        public Object load(long chunk) {
+            return level.getChunk((int) (chunk >> 32), (int) chunk);
+        }
+
+        @Override
+        public void release(long chunk) {
+            level.getChunkSource().removeTicketWithRadius(type, chunkPos(chunk), 0);
+        }
+
+        private static ChunkPos chunkPos(long chunk) {
+            return new ChunkPos((int) (chunk >> 32), (int) chunk);
+        }
+    }
+
+    static final class ChunkPreparation implements AutoCloseable {
+        private final int minChunkX;
+        private final int minChunkZ;
+        private final int width;
+        private final int depth;
+        private final Object[] chunks;
+        private final boolean[] retained;
+        private final TicketAccess tickets;
+        private int prepared;
+        private boolean closing;
+        private boolean closed;
+
+        private ChunkPreparation(int minBlockX, int maxBlockX, int minBlockZ, int maxBlockZ,
+                                 TicketAccess tickets) {
+            minChunkX = chunkCoordinate(minBlockX);
+            minChunkZ = chunkCoordinate(minBlockZ);
+            int maxChunkX = chunkCoordinate(maxBlockX);
+            int maxChunkZ = chunkCoordinate(maxBlockZ);
+            width = maxChunkX - minChunkX + 1;
+            depth = maxChunkZ - minChunkZ + 1;
+            int chunkCount = Math.multiplyExact(width, depth);
+            if (chunkCount > SPAWN_PREPARATION_CHUNK_CAP) {
+                throw new IllegalArgumentException("spawn preparation exceeds the 64-chunk bound");
+            }
+            chunks = new Object[chunkCount];
+            retained = new boolean[chunkCount];
+            this.tickets = tickets;
+        }
+
+        static ChunkPreparation controlled(int minBlockX, int maxBlockX, int minBlockZ, int maxBlockZ,
+                                           LongFunction<?> loader) {
+            return controlled(minBlockX, maxBlockX, minBlockZ, maxBlockZ, new TicketAccess() {
+                @Override public void retain(long chunk) { }
+                @Override public Object load(long chunk) { return loader.apply(chunk); }
+                @Override public void release(long chunk) { }
+            });
+        }
+
+        static ChunkPreparation controlled(int minBlockX, int maxBlockX, int minBlockZ, int maxBlockZ,
+                                           TicketAccess tickets) {
+            return new ChunkPreparation(minBlockX, maxBlockX, minBlockZ, maxBlockZ, tickets);
+        }
+
+        static ChunkPreparation forLevel(ServerLevel level, int minBlockX, int maxBlockX,
+                                         int minBlockZ, int maxBlockZ) {
+            return new ChunkPreparation(minBlockX, maxBlockX, minBlockZ, maxBlockZ,
+                    new MinecraftTicketAccess(level));
+        }
+
+        static ChunkPreparation forDestination(ServerLevel level, Vec3 position) {
+            int centerX = chunkCoordinate(floor(position.x));
+            int centerZ = chunkCoordinate(floor(position.z));
+            return forLevel(level, (centerX - 2) * 16, (centerX + 3) * 16 - 1,
+                    (centerZ - 2) * 16, (centerZ + 3) * 16 - 1);
+        }
+
+        int prepare(int chunkBudget, int worldWorkBudget) {
+            if (closing) throw new IllegalStateException("terrain preparation is closing");
+            if (chunkBudget <= 0 || worldWorkBudget <= 0) return 0;
+            int loaded = 0;
+            int allowed = Math.min(chunkBudget, worldWorkBudget);
+            while (prepared < chunks.length && loaded < allowed) {
+                int xOffset = prepared / depth;
+                int zOffset = prepared % depth;
+                long key = chunkKey(minChunkX + xOffset, minChunkZ + zOffset);
+                Object chunk;
+                try {
+                    tickets.retain(key);
+                    retained[prepared] = true;
+                    chunk = tickets.load(key);
+                    if (chunk == null) throw new IllegalStateException("terrain preparation returned no chunk");
+                } catch (RuntimeException failure) {
+                    try {
+                        close();
+                    } catch (RuntimeException releaseFailure) {
+                        failure.addSuppressed(releaseFailure);
+                    }
+                    throw failure;
+                }
+                chunks[prepared++] = chunk;
+                loaded++;
+            }
+            return loaded;
+        }
+
+        boolean complete() { return prepared == chunks.length; }
+
+        ChunkResidency residency() {
+            if (closing) throw new IllegalStateException("terrain preparation is closing");
+            if (!complete()) throw new IllegalStateException("terrain preparation is incomplete");
+            return new ChunkResidency(minChunkX, minChunkZ, width, depth,
+                    chunks.clone(), chunks.length);
+        }
+
+        int closeWork() {
+            int work = 0;
+            for (boolean owned : retained) if (owned) work++;
+            return work;
+        }
+
+        @Override
+        public void close() {
+            if (closed) return;
+            closing = true;
+            RuntimeException failure = null;
+            for (int index = 0; index < retained.length; index++) {
+                if (!retained[index]) continue;
+                int xOffset = index / depth;
+                int zOffset = index % depth;
+                long key = chunkKey(minChunkX + xOffset, minChunkZ + zOffset);
+                try {
+                    tickets.release(key);
+                    retained[index] = false;
+                } catch (RuntimeException releaseFailure) {
+                    if (failure == null) failure = releaseFailure;
+                    else failure.addSuppressed(releaseFailure);
+                }
+            }
+            closed = closeWork() == 0;
+            if (failure != null) throw failure;
         }
     }
     record Prepared(TeleportTransition transition, boolean clearVelocity) {
@@ -504,9 +659,7 @@ public final class DestinationSafety {
         if (!withinBuildHeight(occupied, level.getMinY(), level.getMaxY())
                 || !level.getWorldBorder().isWithinBounds(occupiedBox)) return false;
 
-        CellRange checked = homeHazardCells(occupied);
-        preloadInvolvedChunks(checked, new HashSet<>(), chunk -> loadChunk(level, chunk));
-        return !containsHomeHazard(level, checked);
+        return !containsHomeHazard(level, homeHazardCells(occupied));
     }
 
     static Bounds standingPlayerBounds(Vec3 position, EntityDimensions standingDimensions) {
@@ -523,7 +676,6 @@ public final class DestinationSafety {
                 || !level.getWorldBorder().isWithinBounds(clearanceBox)) return HomeFit.BLOCKED;
 
         CellRange owners = collisionOwnerCells(clearance);
-        preloadInvolvedChunks(owners, new HashSet<>(), chunk -> loadChunk(level, chunk));
         if (containsHomeHazard(level, homeHazardCells(rootBounds))) return HomeFit.UNSAFE;
         ConfiguredBed configuredBed = configuredBed(level, homeBlock);
         CollisionContext context = CollisionContext.of(root);
@@ -626,7 +778,7 @@ public final class DestinationSafety {
         return Math.floorDiv(blockCoordinate, 16);
     }
 
-    private static void loadChunk(ServerLevel level, long chunk) {
+    static void loadChunk(ServerLevel level, long chunk) {
         level.getChunk((int) (chunk >> 32), (int) chunk);
     }
 

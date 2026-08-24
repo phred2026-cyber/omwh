@@ -15,7 +15,9 @@ import org.slf4j.LoggerFactory;
 import java.util.ArrayDeque;
 import java.util.Deque;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.Map;
+import java.util.Set;
 import java.util.UUID;
 import java.util.function.BooleanSupplier;
 import java.util.function.Consumer;
@@ -27,6 +29,8 @@ public final class Commands {
     private static final Logger LOGGER = LoggerFactory.getLogger("omwh");
     static final int SEARCH_CANDIDATES_PER_TICK = 4_096;
     static final int MAX_EFFECT_DISPATCHES = 1 + 40;
+    static final int MAX_PENDING_TICKET_RELEASE_WORK = DestinationSafety.SPAWN_PREPARATION_CHUNK_CAP
+            + DestinationSafety.DESTINATION_CHUNK_CAP;
     static final int MAX_IMMEDIATE_ROUTE_WORK = Math.max(
             DestinationSafety.MAX_MOUNTED_HOME_SAFETY_WORK,
             DestinationSafety.MAX_END_SAFETY_WORK)
@@ -34,22 +38,30 @@ public final class Commands {
             + MAX_EFFECT_DISPATCHES
             + TeleportService.COMPLETION_WORK;
     static final int SEARCH_WORLD_WORK_PER_TICK = TeleportService.LIFECYCLE_CAPTURE_WORK
+            + MAX_PENDING_TICKET_RELEASE_WORK
             + MAX_IMMEDIATE_ROUTE_WORK;
     static final int PENDING_ROUTE_MINIMUM_PROGRESS_WORK = DestinationSafety.SpawnProbe.MAX_CELL_WORK;
     static final int PENDING_ROUTE_WORK_SLICE = SEARCH_CANDIDATES_PER_TICK
             * PENDING_ROUTE_MINIMUM_PROGRESS_WORK;
+    static final int PENDING_COMPLETION_WORK = MAX_EFFECT_DISPATCHES
+            + TeleportService.COMPLETION_WORK;
     static final int PENDING_ADVANCEMENT_WORK_PER_TICK = TeleportService.LIFECYCLE_VALIDATION_WORK
             + PENDING_ROUTE_WORK_SLICE
-            + TeleportService.COMPLETION_WORK;
+            + PENDING_COMPLETION_WORK
+            + MAX_PENDING_TICKET_RELEASE_WORK;
     static final int MAX_PENDING_VISIT_WORK = PENDING_ADVANCEMENT_WORK_PER_TICK;
     private final OmwhConfig config;
     private final Cooldowns cooldowns;
     private final PendingSearches<UUID, Void> pendingSpawns = new PendingSearches<>();
-    private final TickWorkAllowance serverWork = new TickWorkAllowance(SEARCH_WORLD_WORK_PER_TICK);
+    private final TickWorkAllowance serverWork;
     private long pendingTickEpoch;
 
     @FunctionalInterface
-    interface PendingWork<V> { PendingStep<V> step(int candidateBudget, int worldWorkBudget); }
+    interface PendingWork<V> extends AutoCloseable {
+        PendingStep<V> step(int candidateBudget, int worldWorkBudget);
+        default int closeWork() { return 0; }
+        @Override default void close() { }
+    }
 
     interface CoordinatorHooks<V> {
         TeleportService.LifecycleStatus lifecycleStatus();
@@ -111,6 +123,14 @@ public final class Commands {
             if (hooks.finalAdmission(value) && hooks.anchorCurrent(value)) hooks.complete(value);
             return PendingStep.complete(null, candidatesUsed, worldWorkUsed);
         }
+
+        void close() {
+            route.close();
+        }
+
+        int closeWork() {
+            return route.closeWork();
+        }
     }
 
     static final class TickWorkAllowance {
@@ -142,6 +162,7 @@ public final class Commands {
     static final class PendingSearches<K, V> {
         private final Map<K, PendingWork<V>> searches = new HashMap<>();
         private final Deque<K> roundRobin = new ArrayDeque<>();
+        private final Deque<PendingWork<V>> cleanup = new ArrayDeque<>();
 
         boolean add(K key, PendingWork<V> work) {
             if (searches.putIfAbsent(key, work) != null) return false;
@@ -149,32 +170,89 @@ public final class Commands {
             return true;
         }
         boolean contains(K key) { return searches.containsKey(key); }
-        void remove(K key) { searches.remove(key); roundRobin.remove(key); }
-        void clear() { searches.clear(); roundRobin.clear(); }
+        private PendingWork<V> detach(K key) {
+            PendingWork<V> removed = searches.remove(key);
+            roundRobin.remove(key);
+            return removed;
+        }
+
+        void cancel(K key, TickWorkAllowance allowance) {
+            PendingWork<V> removed = detach(key);
+            if (removed == null) return;
+            int closeWork = removed.closeWork();
+            if (allowance.claim(closeWork)) closeOrRetain(removed);
+            else cleanup.addLast(removed);
+        }
+
+        void clearTerminal() {
+            cleanup.addAll(searches.values());
+            searches.clear();
+            roundRobin.clear();
+            int attemptsRemaining = cleanup.stream()
+                    .mapToInt(work -> Math.max(2, work.closeWork() * 2 + 1))
+                    .sum();
+            while (!cleanup.isEmpty() && attemptsRemaining-- > 0) {
+                closeOrRetain(cleanup.removeFirst());
+            }
+            if (!cleanup.isEmpty()) {
+                throw new IllegalStateException("OMWH could not release all pending /spawn terrain at shutdown");
+            }
+        }
         int size() { return searches.size(); }
+        int cleanupSize() { return cleanup.size(); }
 
         PendingTick tick(int candidateBudget, int worldWorkBudget, Consumer<V> completion) {
+            TickWorkAllowance allowance = new TickWorkAllowance(worldWorkBudget);
+            return tick(candidateBudget, allowance, worldWorkBudget, completion);
+        }
+
+        PendingTick tick(int candidateBudget, TickWorkAllowance allowance, int worldWorkBudget,
+                         Consumer<V> completion) {
+            int tickWorkLimit = Math.min(worldWorkBudget, allowance.remaining());
             int candidatesUsed = 0;
-            int worldWorkUsed = 0;
+            int worldWorkUsed = retryCleanup(allowance, tickWorkLimit);
             int itemsCompleted = 0;
-            while (!roundRobin.isEmpty() && candidatesUsed < candidateBudget && worldWorkUsed < worldWorkBudget) {
+            Set<K> visited = new HashSet<>();
+            while (!roundRobin.isEmpty() && candidatesUsed < candidateBudget && worldWorkUsed < tickWorkLimit) {
                 K key = roundRobin.removeFirst();
+                if (!visited.add(key)) {
+                    roundRobin.addFirst(key);
+                    break;
+                }
                 PendingWork<V> work = searches.get(key);
                 if (work == null) continue;
+                int cleanupReserve = work.closeWork();
+                int availableWorldWork = tickWorkLimit - worldWorkUsed - cleanupReserve;
+                if (availableWorldWork <= 0) {
+                    roundRobin.addFirst(key);
+                    break;
+                }
                 int candidateSlice = Math.min(1, candidateBudget - candidatesUsed);
-                int worldSlice = Math.min(MAX_PENDING_VISIT_WORK,
-                        worldWorkBudget - worldWorkUsed);
+                int worldSlice = Math.min(MAX_PENDING_VISIT_WORK - cleanupReserve, availableWorldWork);
                 PendingStep<V> step = work.step(candidateSlice, worldSlice);
                 if (step.candidatesUsed < 0 || step.candidatesUsed > candidateSlice
                         || step.worldWorkUsed < 0 || step.worldWorkUsed > worldSlice) {
                     throw new IllegalStateException("pending search exceeded its shared allowance");
+                }
+                if (!allowance.claim(step.worldWorkUsed)) {
+                    throw new IllegalStateException("pending search exceeded the shared server allowance");
                 }
                 candidatesUsed += step.candidatesUsed;
                 worldWorkUsed += step.worldWorkUsed;
                 if (step.complete) {
                     searches.remove(key);
                     itemsCompleted++;
-                    completion.accept(step.value);
+                    try {
+                        completion.accept(step.value);
+                    } finally {
+                        int closeWork = work.closeWork();
+                        if (!allowance.claim(closeWork)) {
+                            cleanup.addLast(work);
+                        } else {
+                            worldWorkUsed += closeWork;
+                            closeOrRetain(work);
+                        }
+                    }
                 } else if (step.candidatesUsed == 0 && step.worldWorkUsed == 0) {
                     roundRobin.addFirst(key);
                     break;
@@ -184,11 +262,47 @@ public final class Commands {
             }
             return new PendingTick(candidatesUsed, worldWorkUsed, itemsCompleted);
         }
+
+        private int retryCleanup(TickWorkAllowance allowance, int worldWorkBudget) {
+            int worldWork = 0;
+            int attempts = cleanup.size();
+            while (attempts-- > 0 && !cleanup.isEmpty()) {
+                PendingWork<V> work = cleanup.removeFirst();
+                int attemptWork = work.closeWork();
+                if (attemptWork > worldWorkBudget - worldWork) {
+                    cleanup.addFirst(work);
+                    break;
+                }
+                if (!allowance.claim(attemptWork)) {
+                    cleanup.addFirst(work);
+                    break;
+                }
+                worldWork += attemptWork;
+                closeOrRetain(work);
+            }
+            return worldWork;
+        }
+
+        private int closeOrRetain(PendingWork<V> work) {
+            int worldWork = work.closeWork();
+            try {
+                work.close();
+            } catch (RuntimeException failure) {
+                cleanup.addLast(work);
+                LOGGER.error("OMWH could not release pending /spawn terrain; cleanup will retry", failure);
+            }
+            return worldWork;
+        }
     }
 
     Commands(OmwhConfig config, Cooldowns cooldowns) {
+        this(config, cooldowns, SEARCH_WORLD_WORK_PER_TICK);
+    }
+
+    Commands(OmwhConfig config, Cooldowns cooldowns, int serverWorkLimit) {
         this.config = config;
         this.cooldowns = cooldowns;
+        this.serverWork = new TickWorkAllowance(serverWorkLimit);
     }
 
     <V> PendingWork<Void> createSpawnCoordinator(
@@ -206,9 +320,23 @@ public final class Commands {
             @Override public boolean finalAdmission(V value) { return finalAdmission.test(value); }
             @Override public boolean anchorCurrent(V value) { return anchorCurrent.test(value); }
             @Override public void complete(V value) { completion.accept(value); }
-        }, TeleportService.LIFECYCLE_VALIDATION_WORK, TeleportService.COMPLETION_WORK);
-        return (candidateBudget, worldWorkBudget) ->
-                coordinated.step(pendingTickEpoch, candidateBudget, worldWorkBudget);
+        }, TeleportService.LIFECYCLE_VALIDATION_WORK, PENDING_COMPLETION_WORK);
+        return new PendingWork<>() {
+            @Override
+            public PendingStep<Void> step(int candidateBudget, int worldWorkBudget) {
+                return coordinated.step(pendingTickEpoch, candidateBudget, worldWorkBudget);
+            }
+
+            @Override
+            public int closeWork() {
+                return coordinated.closeWork();
+            }
+
+            @Override
+            public void close() {
+                coordinated.close();
+            }
+        };
     }
 
     static boolean finalCooldownAdmission(Cooldowns cooldowns, UUID playerId, OmwhConfig config,
@@ -287,7 +415,7 @@ public final class Commands {
 
     private int executeHome(ServerPlayer player, boolean force) {
         if (player == null) return 0;
-        pendingSpawns.remove(player.getUUID());
+        cancelPendingForHome(player.getUUID());
         try {
             if (!admit(player)) return 0;
             if (!serverWork.claim(TeleportService.LIFECYCLE_CAPTURE_WORK + MAX_IMMEDIATE_ROUTE_WORK)) {
@@ -304,7 +432,7 @@ public final class Commands {
                         commandMessageWithForceGuidance(config.vehicleTooLargeMessage, config.homeCommand));
                 case UNSAFE -> send(player,
                         commandMessageWithForceGuidance(config.unsafeHomeMessage, config.homeCommand));
-                case ACCEPT -> { return teleport(player, destination.destination(), true, false); }
+                case ACCEPT -> { return teleport(player, destination.destination(), true, true); }
             }
         } catch (TeleportService.PassengerTreeTooLarge tooLarge) {
             sendSafely(player, commandMessage(config.passengerTreeTooLargeMessage, config.homeCommand));
@@ -322,7 +450,9 @@ public final class Commands {
             send(player, commandMessage(config.spawnPendingMessage, config.spawnCommand));
             return 0;
         }
-        if (pendingAction == PendingSpawnAction.CANCEL_AND_CONTINUE) pendingSpawns.remove(player.getUUID());
+        if (pendingAction == PendingSpawnAction.CANCEL_AND_CONTINUE) {
+            cancelPendingForForcedSpawn(player.getUUID());
+        }
         try {
             if (!admit(player)) return 0;
             if (!(player.level() instanceof ServerLevel level)) {
@@ -345,7 +475,7 @@ public final class Commands {
                     return 0;
                 }
                 TeleportService.captureLifecycle(player);
-            } else if (!serverWork.claim(SpawnDestination.ADMISSION_SNAPSHOT_PROBE_WORK)) {
+            } else if (!serverWork.claim(SpawnDestination.PENDING_START_WORK)) {
                 send(player, commandMessage(config.busyMessage, config.spawnCommand));
                 return 0;
             }
@@ -359,12 +489,7 @@ public final class Commands {
             }
             TeleportService.LifecycleFence<Entity> lifecycle = TeleportService.captureLifecycle(player);
             PendingWork<Void> coordinated = createSpawnCoordinator(
-                    (candidateBudget, worldWorkBudget) -> {
-                        SpawnDestination.Tick used = search.tick(candidateBudget, worldWorkBudget);
-                        if (!search.complete()) return PendingStep.pending(
-                                used.candidatesStarted(), used.worldWork());
-                        return PendingStep.complete(search.result(), used.candidatesStarted(), used.worldWork());
-                    },
+                    pendingSpawnRoute(search),
                     () -> TeleportService.lifecycleStatus(lifecycle),
                     result -> result.outcome() != SpawnDestination.Outcome.ACCEPT || admit(player),
                     result -> {
@@ -382,15 +507,11 @@ public final class Commands {
                                     commandMessage(config.passengerTreeTooLargeMessage, config.spawnCommand));
                         }
                     });
-            pendingSpawns.add(player.getUUID(), (candidateBudget, worldWorkBudget) -> {
-                try {
-                    return coordinated.step(candidateBudget, worldWorkBudget);
-                } catch (RuntimeException failure) {
-                    LOGGER.error("Unexpected pending /spawn failure for {}", player.getGameProfile().name(), failure);
-                    sendSafely(player, commandMessage(config.internalErrorMessage, config.spawnCommand));
-                    return failedPendingStep(null, candidateBudget, worldWorkBudget);
-                }
+            PendingWork<Void> guarded = guardPending(coordinated, failure -> {
+                LOGGER.error("Unexpected pending /spawn failure for {}", player.getGameProfile().name(), failure);
+                sendSafely(player, commandMessage(config.internalErrorMessage, config.spawnCommand));
             });
+            pendingSpawns.add(player.getUUID(), guarded);
             return 1;
         } catch (TeleportService.PassengerTreeTooLarge tooLarge) {
             sendSafely(player, commandMessage(config.passengerTreeTooLargeMessage, config.spawnCommand));
@@ -411,16 +532,63 @@ public final class Commands {
         return PendingStep.complete(value, candidateBudget, worldWorkBudget);
     }
 
-    static boolean shouldLoadDestinationChunks(boolean incrementalDestinationReady) {
-        return !incrementalDestinationReady;
+    static <V> PendingWork<V> guardPending(PendingWork<V> work,
+                                            Consumer<RuntimeException> failureHandler) {
+        return new PendingWork<>() {
+            @Override
+            public PendingStep<V> step(int candidateBudget, int worldWorkBudget) {
+                try {
+                    return work.step(candidateBudget, worldWorkBudget);
+                } catch (RuntimeException failure) {
+                    failureHandler.accept(failure);
+                    return failedPendingStep(null, candidateBudget, worldWorkBudget);
+                }
+            }
+
+            @Override
+            public int closeWork() {
+                return work.closeWork();
+            }
+
+            @Override
+            public void close() {
+                work.close();
+            }
+        };
+    }
+
+    static PendingWork<SpawnDestination.Result> pendingSpawnRoute(SpawnDestination.Pending search) {
+        return new PendingWork<>() {
+            @Override
+            public PendingStep<SpawnDestination.Result> step(int candidateBudget, int worldWorkBudget) {
+                SpawnDestination.Tick used = search.tick(candidateBudget, worldWorkBudget);
+                if (!search.complete()) {
+                    return PendingStep.pending(used.candidatesStarted(), used.worldWork());
+                }
+                return PendingStep.complete(search.result(), used.candidatesStarted(), used.worldWork());
+            }
+
+            @Override
+            public int closeWork() {
+                return search.closeWork();
+            }
+
+            @Override
+            public void close() {
+                search.close();
+            }
+        };
+    }
+
+    static boolean shouldLoadDestinationChunks(boolean destinationPrepared) {
+        return !destinationPrepared;
     }
 
     void tick() {
         try {
             pendingTickEpoch++;
-            PendingTick used = pendingSpawns.tick(SEARCH_CANDIDATES_PER_TICK,
+            pendingSpawns.tick(SEARCH_CANDIDATES_PER_TICK, serverWork,
                     Math.min(serverWork.remaining(), PENDING_ADVANCEMENT_WORK_PER_TICK), ignored -> { });
-            if (!serverWork.claim(used.worldWorkUsed())) throw new IllegalStateException("coordinator exceeded tick allowance");
         } catch (RuntimeException failure) {
             LOGGER.error("Unexpected OMWH END_SERVER_TICK failure", failure);
         } finally {
@@ -428,8 +596,16 @@ public final class Commands {
         }
     }
 
-    void removePending(UUID playerId) { pendingSpawns.remove(playerId); }
-    void clearPending() { pendingSpawns.clear(); }
+    void cancelPendingForHome(UUID playerId) { cancelPending(playerId); }
+    void cancelPendingForForcedSpawn(UUID playerId) { cancelPending(playerId); }
+    void removePending(UUID playerId) { cancelPending(playerId); }
+    void respawnPending(UUID playerId) { cancelPending(playerId); }
+    void clearPending() { pendingSpawns.clearTerminal(); }
+    int remainingServerWork() { return serverWork.remaining(); }
+
+    private void cancelPending(UUID playerId) {
+        pendingSpawns.cancel(playerId, serverWork);
+    }
 
     private int completeSpawn(ServerPlayer player, SpawnDestination.Result destination) {
         return switch (destination.outcome()) {
@@ -447,7 +623,7 @@ public final class Commands {
             }
             case ACCEPT -> {
                 yield teleport(player, destination.destination(), false,
-                        destination.incrementalDestinationReady());
+                        destination.destinationPrepared());
             }
         };
     }
@@ -467,8 +643,8 @@ public final class Commands {
     }
 
     private int teleport(ServerPlayer player, DestinationSafety.Prepared destination, boolean home,
-                         boolean incrementalDestinationReady) {
-        if (shouldLoadDestinationChunks(incrementalDestinationReady)) {
+                         boolean destinationPrepared) {
+        if (shouldLoadDestinationChunks(destinationPrepared)) {
             DestinationSafety.loadDestinationChunks(destination.level(), destination.position());
         }
         playEffects(player);

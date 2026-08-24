@@ -24,7 +24,7 @@ OMWH 1.2.0 expands dimension support, gives players an optional safety override,
 
 - Nether `/spawn` now applies Minecraft's normal 1:8 Overworld-to-Nether coordinate scaling and clamps the result to the Nether world border. For example, Overworld spawn at `(2400, 64, -1600)` maps near `(300, 64, -200)` in the Nether instead of using the raw Overworld X/Z values.
 - End `/spawn` now uses Minecraft's vanilla End arrival. Minecraft recreates the obsidian platform and supplies the normal arrival height, west-facing orientation, portal sound, and related transition behavior. Normal `/spawn` checks that exact destination; force keeps the vanilla transition but skips OMWH's placement checks.
-- Normal `/spawn` searches loaded chunks only, within 48 blocks of the spawn anchor on each axis. It never loads or generates terrain, and longer searches resume across server ticks. This protects the server thread, but it also means `/spawn` may refuse a destination that 1.1.3 could reach. The relevant spawn chunks must be loaded when the command runs; pregeneration alone is not enough.
+- Normal `/spawn` now loads the bounded terrain it needs before searching within 48 blocks of the spawn anchor on each axis, then prepares the chosen destination before the final safety check and movement. Terrain preparation and longer safety searches remain pending across server ticks, so cold spawn terrain no longer causes an immediate refusal.
 - A second normal `/spawn` is refused while that player's search is pending. `/home` or `/spawn force` cancels the pending search and continues. OMWH also cancels a pending search when the player disconnects or respawns, or when their dimension, vehicle geometry, or passenger tree changes.
 - Passenger groups are limited to 64 entities. Larger groups are refused before movement. Normal mounted searches also refuse roots wider than 14 blocks or requiring more than 16 blocks of clear height rather than scanning beyond those bounds.
 - Cooldown state now clears when a player disconnects. This also clears the PvP cooldown: a player who reconnects receives the join cooldown instead. Servers concerned about combat logging should compare `joinCooldownSeconds` with `pvpCooldownSeconds`.
@@ -47,7 +47,7 @@ OMWH 1.2.0 expands dimension support, gives players an optional safety override,
 - Configuration is loaded only during startup. Restart the server after editing `config/omwh.json`; OMWH has no reload command.
 - Known config fields now require the documented JSON type and valid value. Quoted numbers or booleans, `null`, negative cooldowns, invalid or duplicate command names, malformed JSON, and a non-object root stop startup with a specific configuration error. Omitted fields still use defaults, and unknown fields are still ignored.
 - Remove the old OMWH jar before installing 1.2.0. The Java package and Fabric entrypoint moved internally, but the mod ID remains `omwh`; leaving old and new jars together causes Fabric Loader to stop on a duplicate mod ID.
-- Check that the relevant spawn chunks stay loaded after upgrading. The new search cannot use pregenerated chunks once Minecraft has unloaded them.
+- Normal `/spawn` may stay pending while OMWH prepares up to 64 chunks before searching; no spawn-area pregeneration or permanent chunk-loading setup is required.
 
 ## 1.1.3
 

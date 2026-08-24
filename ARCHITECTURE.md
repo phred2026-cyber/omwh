@@ -20,7 +20,7 @@ omwh/
 │   │   │   ├── Commands.java
 │   │   │   │   # Registers the configured /home and /spawn names and owns their shared
 │   │   │   │   # cooldown → destination → teleport → message/effect flow, including pending
-│   │   │   │   # /spawn lifecycles advanced fairly under one server-wide tick budget.
+│   │   │   │   # /spawn lifecycles and cancellation cleanup under one server-wide tick budget.
 │   │   │   ├── Cooldowns.java
 │   │   │   │   # Sole owner of regular, PvP, damage, and join cooldown state plus the Fabric
 │   │   │   │   # callbacks that update it. Commands receive one blocking result from this file.
@@ -29,10 +29,10 @@ omwh/
 │   │   │   │   # dimensions, mounted clearance, and the single uncovered-bed above-bed fallback.
 │   │   │   ├── SpawnDestination.java
 │   │   │   │   # /spawn-only policy: Overworld/Nether/End/modded-dimension routing, vanilla End
-│   │   │   │   # transition behavior, and resumable deterministic safe-location search state.
+│   │   │   │   # transition behavior, bounded terrain preparation, and resumable deterministic search.
 │   │   │   ├── DestinationSafety.java
-│   │   │   │   # Shared placement owner for chunks, build limits, world border, support, hazards,
-│   │   │   │   # fluids, collision, and the required player or mounted-tree footprint.
+│   │   │   │   # Shared placement owner for bounded chunk preparation, temporary residency tickets,
+│   │   │   │   # retained chunk snapshots, ticket release, build limits, support, hazards, and collision footprints.
 │   │   │   └── TeleportService.java
 │   │   │       # Sole entity-mutation owner. Captures UUIDs, exact passenger edges, source validity,
 │   │   │       # and player identities; performs one same- or cross-dimension recursive root

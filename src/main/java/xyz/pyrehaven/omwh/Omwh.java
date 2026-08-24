@@ -29,7 +29,7 @@ public final class Omwh implements ModInitializer {
             commands.removePending(handler.player.getUUID());
         });
         ServerPlayerEvents.AFTER_RESPAWN.register((oldPlayer, newPlayer, alive) ->
-                commands.removePending(oldPlayer.getUUID()));
+                commands.respawnPending(oldPlayer.getUUID()));
         ServerTickEvents.END_SERVER_TICK.register(server -> commands.tick());
         ServerLifecycleEvents.SERVER_STOPPED.register(server -> commands.clearPending());
         ServerLivingEntityEvents.ALLOW_DAMAGE.register((entity, source, amount) -> {

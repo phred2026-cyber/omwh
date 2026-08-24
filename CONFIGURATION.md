@@ -57,6 +57,8 @@ In the Overworld, disabling `enableOverworldSpawn` denies `/spawn`. In the Nethe
 
 Force is available to every player who can use the parent command when `enableForceOverride` is enabled. It bypasses destination safety and vehicle-size checks only. It does not bypass cooldowns, missing homes, dimension routing, unavailable worlds, command-source checks, or teleport failures. OMWH has no permission nodes, so base commands are available to all player sources and force can only be toggled globally, not permissioned separately.
 
+Normal `/spawn` may remain pending while OMWH prepares and checks the selected spawn area. Search preparation is hard-bounded to 64 chunks and advances by at most two chunks per pending request in a server tick. After choosing a safe spot, OMWH also prepares its exact 25-chunk destination area before the final check and movement. `/home` prepares at most 25 destination chunks before Minecraft resolves the saved respawn placement and before OMWH's normal safety check; force skips safety but still prepares terrain before movement. These bounds are fixed behavior and are not configuration fields.
+
 ## Messages
 
 All message and destination-label fields are JSON strings. Both `&` and `§` Minecraft color codes are accepted. OMWH translates ampersands to section signs at the final send boundary. Use `\n` in JSON when a message should continue on a new line.

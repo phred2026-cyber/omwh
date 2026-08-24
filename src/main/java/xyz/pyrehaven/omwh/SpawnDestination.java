@@ -17,6 +17,7 @@ import org.slf4j.LoggerFactory;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
 import java.util.function.BooleanSupplier;
+import java.util.function.BiFunction;
 import java.util.function.Consumer;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -25,9 +26,9 @@ public final class SpawnDestination {
     private static final Logger LOGGER = LoggerFactory.getLogger("omwh");
     static final int HORIZONTAL_BOUND = 48;
     static final int VERTICAL_BOUND = 48;
+    static final int PREPARATION_CHUNKS_PER_VISIT = 2;
 
-    static final int ADMISSION_SNAPSHOT_PROBE_WORK = 64;
-    static final int FINAL_SNAPSHOT_PROBE_WORK = 4;
+    static final int PENDING_START_WORK = 1;
 
     record Offset(int x, int y, int z) { }
     enum Dimension { OVERWORLD, NETHER, END, OTHER }
@@ -36,7 +37,7 @@ public final class SpawnDestination {
     record Selection(Outcome outcome, Offset offset, int candidatesVisited,
                      int rootChecks, int playerChecks) { }
     record Result(Outcome outcome, DestinationSafety.Prepared destination,
-                  boolean incrementalDestinationReady, BlockPos searchAnchor) {
+                  boolean destinationPrepared, BlockPos searchAnchor) {
         Result(Outcome outcome, DestinationSafety.Prepared destination) {
             this(outcome, destination, false, null);
         }
@@ -45,9 +46,6 @@ public final class SpawnDestination {
     enum ProbeOutcome { INCOMPLETE, FITS, REJECTED }
     record ProbeStep(ProbeOutcome outcome, int worldWork) { }
     record Tick(int candidatesStarted, int worldWork) { }
-    record Start(Search search, Selection selection) {
-        boolean complete() { return selection != null; }
-    }
     record Plan(Result immediate, Pending pending) { }
 
     interface CandidateProbe {
@@ -125,16 +123,22 @@ public final class SpawnDestination {
         }
     }
 
-    static final class Pending {
-        private final Search search;
+    static final class Pending implements AutoCloseable {
+        private Search search;
+        private final Iterator<Offset> candidates;
+        private final boolean mounted;
+        private final DestinationSafety.ChunkPreparation preparation;
+        private final Function<DestinationSafety.ChunkResidency, CandidateProbe> preparedProbe;
         private final ServerLevel level;
         private final BlockPos center;
         private final BlockPos searchAnchor;
         private final int rootWidth;
         private final float yaw;
         private final float pitch;
-        private final Function<BlockPos, DestinationSafety.SpawnProbe> freshProbe;
-        private DestinationSafety.SpawnProbe revalidation;
+        private final Function<Vec3, DestinationSafety.ChunkPreparation> finalPreparationFactory;
+        private final BiFunction<BlockPos, DestinationSafety.ChunkResidency, CandidateProbe> finalProbeFactory;
+        private DestinationSafety.ChunkPreparation finalPreparation;
+        private CandidateProbe revalidation;
         private DestinationSafety.Prepared destination;
         private Result result;
 
@@ -142,17 +146,51 @@ public final class SpawnDestination {
                         int rootWidth, float yaw, float pitch,
                         Function<BlockPos, DestinationSafety.SpawnProbe> freshProbe) {
             this.search = search;
+            this.candidates = null;
+            this.mounted = false;
+            this.preparation = null;
+            this.preparedProbe = null;
             this.level = level;
             this.center = center;
             this.searchAnchor = searchAnchor;
             this.rootWidth = rootWidth;
             this.yaw = yaw;
             this.pitch = pitch;
-            this.freshProbe = freshProbe;
+            this.finalPreparationFactory = null;
+            this.finalProbeFactory = (feet, ignored) -> freshProbe.apply(feet);
+        }
+
+        private Pending(Iterator<Offset> candidates, boolean mounted,
+                        DestinationSafety.ChunkPreparation preparation,
+                        Function<DestinationSafety.ChunkResidency, CandidateProbe> preparedProbe,
+                        ServerLevel level, BlockPos center, BlockPos searchAnchor,
+                        int rootWidth, float yaw, float pitch,
+                        Function<Vec3, DestinationSafety.ChunkPreparation> finalPreparationFactory,
+                        BiFunction<BlockPos, DestinationSafety.ChunkResidency, CandidateProbe> finalProbeFactory) {
+            this.search = null;
+            this.candidates = candidates;
+            this.mounted = mounted;
+            this.preparation = preparation;
+            this.preparedProbe = preparedProbe;
+            this.level = level;
+            this.center = center;
+            this.searchAnchor = searchAnchor;
+            this.rootWidth = rootWidth;
+            this.yaw = yaw;
+            this.pitch = pitch;
+            this.finalPreparationFactory = finalPreparationFactory;
+            this.finalProbeFactory = finalProbeFactory;
         }
 
         Tick tick(int candidateBudget, int worldWorkBudget) {
             if (result != null) throw new IllegalStateException("pending spawn is already complete");
+            if (preparation != null && !preparation.complete()) {
+                int prepared = preparation.prepare(PREPARATION_CHUNKS_PER_VISIT, worldWorkBudget);
+                return new Tick(0, prepared);
+            }
+            if (search == null) {
+                search = new Search(candidates, preparedProbe.apply(preparation.residency()), mounted);
+            }
             if (!search.complete()) {
                 Tick used = search.tick(candidateBudget, worldWorkBudget);
                 if (!search.complete()) return used;
@@ -165,24 +203,30 @@ public final class SpawnDestination {
                 double centerOffset = rootWidth % 2 == 0 ? 0.0 : 0.5;
                 destination = DestinationSafety.Prepared.ordinary(level,
                         new Vec3(feet.getX() + centerOffset, feet.getY(), feet.getZ() + centerOffset), yaw, pitch);
+                if (finalPreparationFactory != null) {
+                    finalPreparation = finalPreparationFactory.apply(destination.position());
+                }
                 return used;
             }
 
-            int snapshotWork = 0;
-            if (revalidation == null) {
-                if (worldWorkBudget < FINAL_SNAPSHOT_PROBE_WORK) return new Tick(0, 0);
-                BlockPos feet = BlockPos.containing(destination.position());
-                revalidation = freshProbe.apply(feet);
-                revalidation.begin(new Offset(0, 0, 0), ProbeKind.ROOT);
-                snapshotWork = FINAL_SNAPSHOT_PROBE_WORK;
+            if (finalPreparation != null && !finalPreparation.complete()) {
+                int prepared = finalPreparation.prepare(PREPARATION_CHUNKS_PER_VISIT, worldWorkBudget);
+                return new Tick(0, prepared);
             }
-            ProbeStep checked = revalidation.step(worldWorkBudget - snapshotWork);
+            if (revalidation == null) {
+                BlockPos feet = BlockPos.containing(destination.position());
+                DestinationSafety.ChunkResidency residency = finalPreparation == null
+                        ? null : finalPreparation.residency();
+                revalidation = finalProbeFactory.apply(feet, residency);
+                revalidation.begin(new Offset(0, 0, 0), ProbeKind.ROOT);
+            }
+            ProbeStep checked = revalidation.step(worldWorkBudget);
             if (checked.outcome == ProbeOutcome.REJECTED) {
                 result = new Result(Outcome.UNSAFE, null);
             } else if (checked.outcome == ProbeOutcome.FITS) {
                 result = new Result(Outcome.ACCEPT, destination, true, searchAnchor);
             }
-            return new Tick(0, snapshotWork + checked.worldWork);
+            return new Tick(0, checked.worldWork);
         }
 
         boolean complete() { return result != null; }
@@ -196,6 +240,53 @@ public final class SpawnDestination {
                                   Function<BlockPos, DestinationSafety.SpawnProbe> freshProbe) {
             return new Pending(search, null, center, center, rootWidth, 0, 0,
                     freshProbe);
+        }
+
+        static Pending controlledPreparing(Iterator<Offset> candidates, boolean mounted,
+                                           DestinationSafety.ChunkPreparation preparation,
+                                           Function<DestinationSafety.ChunkResidency, CandidateProbe> preparedProbe,
+                                           BlockPos center, int rootWidth,
+                                           Function<BlockPos, DestinationSafety.SpawnProbe> freshProbe) {
+            return new Pending(candidates, mounted, preparation, preparedProbe,
+                    null, center, center, rootWidth, 0, 0, null,
+                    (feet, ignored) -> freshProbe.apply(feet));
+        }
+
+        static Pending controlledPreparing(Iterator<Offset> candidates, boolean mounted,
+                                           DestinationSafety.ChunkPreparation preparation,
+                                           Function<DestinationSafety.ChunkResidency, CandidateProbe> preparedProbe,
+                                           BlockPos center, int rootWidth,
+                                           Function<Vec3, DestinationSafety.ChunkPreparation> finalPreparationFactory,
+                                           BiFunction<BlockPos, DestinationSafety.ChunkResidency, CandidateProbe> finalProbeFactory) {
+            return new Pending(candidates, mounted, preparation, preparedProbe,
+                    null, center, center, rootWidth, 0, 0,
+                    finalPreparationFactory, finalProbeFactory);
+        }
+
+        int closeWork() {
+            int work = preparation == null ? 0 : preparation.closeWork();
+            return work + (finalPreparation == null ? 0 : finalPreparation.closeWork());
+        }
+
+        @Override
+        public void close() {
+            RuntimeException failure = null;
+            if (finalPreparation != null) {
+                try {
+                    finalPreparation.close();
+                } catch (RuntimeException closeFailure) {
+                    failure = closeFailure;
+                }
+            }
+            if (preparation != null) {
+                try {
+                    preparation.close();
+                } catch (RuntimeException closeFailure) {
+                    if (failure == null) failure = closeFailure;
+                    else failure.addSuppressed(closeFailure);
+                }
+            }
+            if (failure != null) throw failure;
         }
     }
 
@@ -291,14 +382,6 @@ public final class SpawnDestination {
         return currentAnchor(spawnData, nether, scale, level.getWorldBorder()::clampToBounds);
     }
 
-    static Start start(Iterator<Offset> candidates, CandidateProbe probe, boolean mounted,
-                       DestinationSafety.ChunkResidency residency) {
-        if (residency.fullyCold()) {
-            return new Start(null, new Selection(Outcome.UNSAFE, null, 0, 0, 0));
-        }
-        return new Start(new Search(candidates, probe, mounted), null);
-    }
-
     static Outcome acceptEnd(boolean force, BooleanSupplier rootFits, BooleanSupplier playerFits) {
         return acceptEnd(force, 1, 2, rootFits, playerFits);
     }
@@ -339,30 +422,20 @@ public final class SpawnDestination {
         int residencyWidth = searchRootWidth(rootWidth, rootHeight);
         BlockPos center = anchor;
         int halfWidth = (residencyWidth + 1) / 2;
-        DestinationSafety.ChunkResidency residency = DestinationSafety.ChunkResidency.captureValues(
+        DestinationSafety.ChunkPreparation preparation = DestinationSafety.ChunkPreparation.forLevel(
+                level,
                 center.getX() - HORIZONTAL_BOUND - halfWidth - 1,
                 center.getX() + HORIZONTAL_BOUND + halfWidth + 1,
                 center.getZ() - HORIZONTAL_BOUND - halfWidth - 1,
-                center.getZ() + HORIZONTAL_BOUND + halfWidth + 1,
-                chunk -> level.getChunkSource().getChunkNow((int) (chunk >> 32), (int) chunk));
-        DestinationSafety.SpawnProbe probe = new DestinationSafety.SpawnProbe(
-                level, center, rootWidth, rootHeight, rootGeometrySupported, residency);
-        Start start = start(offsets(HORIZONTAL_BOUND, VERTICAL_BOUND).iterator(),
-                probe, root != player, residency);
-        if (start.complete()) return new Plan(new Result(start.selection.outcome, null), null);
-        return new Plan(null, new Pending(start.search, level, center, anchor, rootWidth,
-                root.getYRot(), root.getXRot(),
-                feet -> {
-                    double centerOffset = rootWidth % 2 == 0 ? 0.0 : 0.5;
-                    DestinationSafety.Footprint footprint = DestinationSafety.footprint(
-                            feet.getX() + centerOffset, feet.getZ() + centerOffset, rootWidth);
-                    DestinationSafety.ChunkResidency fresh = DestinationSafety.ChunkResidency.captureValues(
-                            footprint.minX() - 1, footprint.maxX() + 1,
-                            footprint.minZ() - 1, footprint.maxZ() + 1,
-                            chunk -> level.getChunkSource().getChunkNow((int) (chunk >> 32), (int) chunk));
-                    return new DestinationSafety.SpawnProbe(
-                            level, feet, rootWidth, rootHeight, true, fresh);
-                }));
+                center.getZ() + HORIZONTAL_BOUND + halfWidth + 1);
+        return new Plan(null, new Pending(offsets(HORIZONTAL_BOUND, VERTICAL_BOUND).iterator(),
+                root != player, preparation,
+                residency -> new DestinationSafety.SpawnProbe(
+                        level, center, rootWidth, rootHeight, rootGeometrySupported, residency),
+                level, center, anchor, rootWidth, root.getYRot(), root.getXRot(),
+                position -> DestinationSafety.ChunkPreparation.forDestination(level, position),
+                (feet, residency) -> new DestinationSafety.SpawnProbe(
+                        level, feet, rootWidth, rootHeight, true, residency)));
     }
 
     private static Result findEnd(ServerPlayer player, ServerLevel endLevel, boolean force) {

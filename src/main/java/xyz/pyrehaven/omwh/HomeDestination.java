@@ -9,6 +9,7 @@ import net.minecraft.world.level.portal.TeleportTransition;
 import net.minecraft.world.phys.Vec3;
 
 import java.util.function.BooleanSupplier;
+import java.util.function.LongConsumer;
 import java.util.function.Supplier;
 
 public final class HomeDestination {
@@ -16,6 +17,19 @@ public final class HomeDestination {
     enum Outcome { ACCEPT, NO_HOME, CROSS_DIMENSION, VEHICLE_TOO_LARGE, UNSAFE }
     enum MountedChoice { EXACT, ABOVE_BED, VEHICLE_TOO_LARGE, UNSAFE }
     record Result(Outcome outcome, DestinationSafety.Prepared destination) { }
+    record SavedHome(ServerPlayer player, ServerLevel currentLevel, ServerLevel savedLevel,
+                     BlockPos homeBlock, boolean forcedRespawn) { }
+    record PreparedSavedHome(SavedHome home) { }
+    record ResolvedHome(PreparedSavedHome prepared, TeleportTransition respawn, Entity root) { }
+    record Validation(Outcome outcome, SavedHome home) { }
+    record Resolution(Outcome outcome, ResolvedHome home) { }
+
+    interface HomeAccess {
+        Validation validate();
+        PreparedSavedHome prepare(SavedHome home);
+        Resolution resolve(PreparedSavedHome prepared);
+        Result evaluate(ResolvedHome resolved, boolean force);
+    }
 
     private HomeDestination() { }
 
@@ -51,22 +65,29 @@ public final class HomeDestination {
     }
 
     static Result find(ServerPlayer player, boolean force, boolean crossDimensionEnabled) {
-        var respawnConfig = player.getRespawnConfig();
-        if (respawnConfig == null) return new Result(Outcome.NO_HOME, null);
+        return find(force, new MinecraftHomeAccess(player, crossDimensionEnabled));
+    }
 
-        if (!(player.level() instanceof ServerLevel current)) return new Result(Outcome.UNSAFE, null);
-        ServerLevel savedLevel = current.getServer().getLevel(respawnConfig.respawnData().dimension());
-        if (savedLevel == null) return new Result(Outcome.NO_HOME, null);
+    static Result find(boolean force, HomeAccess access) {
+        Validation validation = access.validate();
+        if (validation.outcome() != Outcome.ACCEPT) return new Result(validation.outcome(), null);
+        PreparedSavedHome prepared = access.prepare(validation.home());
+        Resolution resolution = access.resolve(prepared);
+        if (resolution.outcome() != Outcome.ACCEPT) return new Result(resolution.outcome(), null);
+        return access.evaluate(resolution.home(), force);
+    }
 
-        // false preserves respawn-anchor charges; vanilla remains the authority for respawn placement.
-        TeleportTransition respawn = player.findRespawnPositionAndUseSpawnBlock(
-                false, TeleportTransition.DO_NOTHING);
-        Decision decision = decide(respawn.missingRespawnBlock(), true,
-                current.dimension().equals(respawn.newLevel().dimension()), crossDimensionEnabled);
-        if (decision == Decision.NO_HOME) return new Result(Outcome.NO_HOME, null);
-        if (decision == Decision.CROSS_DIMENSION) return new Result(Outcome.CROSS_DIMENSION, null);
+    static PreparedSavedHome prepare(SavedHome home, LongConsumer loader) {
+        for (long chunk : DestinationSafety.destinationChunks(
+                home.homeBlock().getX() + 0.5, home.homeBlock().getZ() + 0.5)) loader.accept(chunk);
+        return new PreparedSavedHome(home);
+    }
 
-        Entity root = player.getRootVehicle();
+    static Result evaluate(ResolvedHome resolved, boolean force) {
+        SavedHome home = resolved.prepared().home();
+        ServerPlayer player = home.player();
+        TeleportTransition respawn = resolved.respawn();
+        Entity root = resolved.root();
         if (root == player) {
             if (!acceptUnmounted(force, () -> DestinationSafety.unmountedHomeFits(
                     player, respawn.newLevel(), respawn.position()))) {
@@ -86,12 +107,12 @@ public final class HomeDestination {
             return new Result(Outcome.VEHICLE_TOO_LARGE, null);
         }
 
-        BlockPos homeBlock = respawnConfig.respawnData().pos();
+        BlockPos homeBlock = home.homeBlock();
         DestinationSafety.HomeFit exactFit = DestinationSafety.mountedHomeFit(
                 root, respawn.newLevel(), respawn.position(), homeBlock);
         boolean bed = respawn.newLevel().getBlockState(homeBlock).getBlock() instanceof BedBlock;
         boolean covered = bed && isCoveredBed(respawn.newLevel(), homeBlock);
-        boolean mayTryFallback = mayTryAboveBed(true, bed, respawnConfig.forced(), covered);
+        boolean mayTryFallback = mayTryAboveBed(true, bed, home.forcedRespawn(), covered);
         Vec3 aboveBed = new Vec3(homeBlock.getX() + 0.5, homeBlock.getY() + 1.0,
                 homeBlock.getZ() + 0.5);
         DestinationSafety.HomeFit fallbackFit = mayTryFallback
@@ -105,6 +126,50 @@ public final class HomeDestination {
         Vec3 position = choice == MountedChoice.ABOVE_BED ? aboveBed : respawn.position();
         return new Result(Outcome.ACCEPT, DestinationSafety.Prepared.ordinary(
                 respawn.newLevel(), position, root.getYRot(), root.getXRot()));
+    }
+
+    private static final class MinecraftHomeAccess implements HomeAccess {
+        private final ServerPlayer player;
+        private final boolean crossDimensionEnabled;
+
+        private MinecraftHomeAccess(ServerPlayer player, boolean crossDimensionEnabled) {
+            this.player = player;
+            this.crossDimensionEnabled = crossDimensionEnabled;
+        }
+
+        @Override
+        public Validation validate() {
+            var respawnConfig = player.getRespawnConfig();
+            if (respawnConfig == null) return new Validation(Outcome.NO_HOME, null);
+            if (!(player.level() instanceof ServerLevel current)) return new Validation(Outcome.UNSAFE, null);
+            ServerLevel savedLevel = current.getServer().getLevel(respawnConfig.respawnData().dimension());
+            if (savedLevel == null) return new Validation(Outcome.NO_HOME, null);
+            if (!current.dimension().equals(savedLevel.dimension()) && !crossDimensionEnabled) {
+                return new Validation(Outcome.CROSS_DIMENSION, null);
+            }
+            return new Validation(Outcome.ACCEPT, new SavedHome(player, current, savedLevel,
+                    respawnConfig.respawnData().pos(), respawnConfig.forced()));
+        }
+
+        @Override
+        public PreparedSavedHome prepare(SavedHome home) {
+            return HomeDestination.prepare(home, chunk -> DestinationSafety.loadChunk(home.savedLevel(), chunk));
+        }
+
+        @Override
+        public Resolution resolve(PreparedSavedHome prepared) {
+            // false preserves respawn-anchor charges; vanilla remains the authority for placement.
+            TeleportTransition respawn = player.findRespawnPositionAndUseSpawnBlock(
+                    false, TeleportTransition.DO_NOTHING);
+            if (respawn.missingRespawnBlock()) return new Resolution(Outcome.NO_HOME, null);
+            return new Resolution(Outcome.ACCEPT,
+                    new ResolvedHome(prepared, respawn, player.getRootVehicle()));
+        }
+
+        @Override
+        public Result evaluate(ResolvedHome resolved, boolean force) {
+            return HomeDestination.evaluate(resolved, force);
+        }
     }
 
     private static boolean isCoveredBed(ServerLevel level, BlockPos homeBlock) {

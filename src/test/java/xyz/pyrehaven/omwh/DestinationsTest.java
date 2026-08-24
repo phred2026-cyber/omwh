@@ -22,6 +22,7 @@ public final class DestinationsTest {
         homePolicyAllowsOnlyAcceptedRespawnsAndOneBedAlternate();
         unmountedHomeRejectsHazardsUnlessForceWasRequested();
         homeSafetyUsesStandingDimensionsAndExactHazards();
+        homePreparationIsARequiredTypeStateBeforeSafety();
         spawnRoutingHonorsThreePoliciesAndCrossingBoundary();
         forceUsesRawDestinationsWithoutChangingAdmission();
         mountedHomeClearanceUsesRootMarginsAndOnlyBedPolicyExemption();
@@ -33,10 +34,12 @@ public final class DestinationsTest {
         spawnSearchIsLazyDeterministicAndComplete();
         zeroBoundsEmitOnlyTheOrigin();
         incrementalSearchResumesWithinFixedTickBudgets();
-        wholeColdSearchRejectsBeforeCandidateOrBlockWork();
+        coldSpawnPreparationIsExactBoundedAndPrecedesSearch();
+        temporaryChunkTicketsOwnResidencyUntilExplicitClose();
         residencySnapshotRetainsChunkValuesForLoadedOnlyReads();
         productionSpawnProbeUsesRealBlockStatesAndHonestCollisionWork();
         finalLiveRevalidationRejectsAChangedAcceptedFootprint();
+        edgeAcceptancePreparesExactFinalFiveByFiveBeforeFreshValidation();
         oversizedModdedRootsKeepTheSnapshotHardBounded();
         productionSearchHotPathHasBoundedAllocationAndNoCandidateChunkSets();
         spawnReadFailureNeverInventsCoordinates();
@@ -46,7 +49,7 @@ public final class DestinationsTest {
         spawnFailureDistinguishesOversizedVehicle();
         collisionOwnersIncludeShellAndEveryInvolvedChunk();
         safetyOwnsFootprintsHazardsAndFiveByFiveChunkPreparation();
-        System.out.println("DestinationsTest PASS (27 behavior groups)");
+        System.out.println("DestinationsTest PASS (30 behavior groups)");
     }
 
     private static void homePolicyAllowsOnlyAcceptedRespawnsAndOneBedAlternate() {
@@ -98,6 +101,43 @@ public final class DestinationsTest {
         check(DestinationSafety.isHazard(Blocks.MAGMA_BLOCK), "magma is hazardous");
         check(!DestinationSafety.isHazard(Blocks.FIRE_CORAL), "fire coral is not fire");
         check(!DestinationSafety.isHazard(Blocks.DEAD_FIRE_CORAL_BLOCK), "dead fire coral is not fire");
+    }
+
+    private static void homePreparationIsARequiredTypeStateBeforeSafety() {
+        List<String> order = new ArrayList<>();
+        List<Long> requested = new ArrayList<>();
+        BlockPos savedRespawn = new BlockPos(31, 70, -1);
+        HomeDestination.SavedHome saved = new HomeDestination.SavedHome(
+                null, null, null, savedRespawn, false);
+        HomeDestination.Result accepted = HomeDestination.find(false, new HomeDestination.HomeAccess() {
+            @Override public HomeDestination.Validation validate() {
+                order.add("validate");
+                return new HomeDestination.Validation(HomeDestination.Outcome.ACCEPT, saved);
+            }
+            @Override public HomeDestination.PreparedSavedHome prepare(HomeDestination.SavedHome home) {
+                order.add("prepare");
+                return HomeDestination.prepare(home, requested::add);
+            }
+            @Override public HomeDestination.Resolution resolve(HomeDestination.PreparedSavedHome prepared) {
+                order.add("resolve");
+                return new HomeDestination.Resolution(HomeDestination.Outcome.ACCEPT,
+                        new HomeDestination.ResolvedHome(prepared, null, null));
+            }
+            @Override public HomeDestination.Result evaluate(HomeDestination.ResolvedHome resolved, boolean force) {
+                order.add("safety");
+                return new HomeDestination.Result(HomeDestination.Outcome.ACCEPT, null);
+            }
+        });
+
+        check(accepted.outcome() == HomeDestination.Outcome.ACCEPT,
+                "production home coordinator returns the evaluated result");
+        check(order.equals(List.of("validate", "prepare", "resolve", "safety")),
+                "saved-home terrain is prepared before vanilla respawn resolution and safety");
+        check(requested.equals(DestinationSafety.destinationChunks(savedRespawn.getX() + 0.5,
+                        savedRespawn.getZ() + 0.5)),
+                "home preparation is centered on the known saved respawn block");
+        check(requested.size() == 25 && new HashSet<>(requested).size() == 25,
+                "home preparation makes exactly 25 deduplicated requests");
     }
 
     private static void spawnRoutingHonorsThreePoliciesAndCrossingBoundary() {
@@ -285,8 +325,9 @@ public final class DestinationsTest {
         check(DestinationSafety.MAX_SPAWN_CANDIDATE_WORK == 46_372,
                 "spawn candidate bound independently includes support collision-shape checks");
         check(Commands.MAX_IMMEDIATE_ROUTE_WORK == 120_096
-                        && Commands.SEARCH_WORLD_WORK_PER_TICK == 120_671,
-                "immediate and aggregate reservations match independently calculated maxima");
+                        && Commands.MAX_PENDING_TICKET_RELEASE_WORK == 89
+                        && Commands.SEARCH_WORLD_WORK_PER_TICK == 120_760,
+                "cleanup, immediate, and aggregate reservations match independently calculated maxima");
         check(DestinationSafety.destinationChunks(0, 0).size()
                         == DestinationSafety.DESTINATION_CHUNK_CAP,
                 "immediate preparation is explicitly capped at 25 chunks");
@@ -381,31 +422,160 @@ public final class DestinationsTest {
         check(rootOrder.equals(expected), "tick resume preserves exact shell/x/y/z order without repeats or skips");
     }
 
-    private static void wholeColdSearchRejectsBeforeCandidateOrBlockWork() {
-        AtomicInteger chunkProbes = new AtomicInteger();
-        DestinationSafety.ChunkResidency cold = DestinationSafety.ChunkResidency.capture(
-                -50, 50, -50, 50, chunk -> {
-                    chunkProbes.incrementAndGet();
-                    return false;
+    private static void coldSpawnPreparationIsExactBoundedAndPrecedesSearch() {
+        List<Long> generated = new ArrayList<>();
+        Object chunk = new Object();
+        DestinationSafety.ChunkPreparation preparation = DestinationSafety.ChunkPreparation.controlled(
+                -56, 56, -56, 56, key -> {
+                    generated.add(key);
+                    return chunk;
                 });
         AtomicInteger candidateBegins = new AtomicInteger();
-        AtomicInteger blockReads = new AtomicInteger();
-        SpawnDestination.Start start = SpawnDestination.start(
-                SpawnDestination.offsets(48, 48).iterator(), new SpawnDestination.CandidateProbe() {
-                    @Override public void begin(SpawnDestination.Offset offset, SpawnDestination.ProbeKind kind) {
-                        candidateBegins.incrementAndGet();
+        SpawnDestination.CandidateProbe probe = new SpawnDestination.CandidateProbe() {
+            @Override public void begin(SpawnDestination.Offset offset, SpawnDestination.ProbeKind kind) {
+                check(preparation.complete(), "search cannot begin before every destination chunk is prepared");
+                candidateBegins.incrementAndGet();
+            }
+            @Override public SpawnDestination.ProbeStep step(int availableWorldWork) {
+                return new SpawnDestination.ProbeStep(SpawnDestination.ProbeOutcome.REJECTED, 0);
+            }
+        };
+        SpawnDestination.Pending pending = SpawnDestination.Pending.controlledPreparing(
+                SpawnDestination.offsets(0, 0).iterator(), false, preparation,
+                ignored -> probe, BlockPos.ZERO, 1,
+                feet -> DestinationSafety.SpawnProbe.controlled(feet, 1, 2,
+                        preparation.residency(), position -> Blocks.AIR.defaultBlockState()));
+
+        int preparationTicks = 0;
+        while (!preparation.complete()) {
+            int before = generated.size();
+            SpawnDestination.Tick used = pending.tick(1, 10_000);
+            check(used.candidatesStarted() == 0,
+                    "cold normal spawn remains pending instead of returning UNSAFE during preparation");
+            check(generated.size() - before <= SpawnDestination.PREPARATION_CHUNKS_PER_VISIT,
+                    "each pending visit obeys the fixed preparation quantum");
+            check(++preparationTicks < 100, "bounded preparation completes");
+        }
+        check(candidateBegins.get() == 0, "search starts on a later phase visit after preparation completes");
+        pending.tick(1, 10_000);
+        check(candidateBegins.get() == 1, "search begins after the complete prepared snapshot is captured");
+
+        List<Long> expected = new ArrayList<>();
+        for (int x = -4; x <= 3; x++) {
+            for (int z = -4; z <= 3; z++) expected.add(DestinationSafety.chunkKey(x, z));
+        }
+        check(generated.equals(expected), "preparation emits the exact deterministic x/z chunk order");
+        check(new HashSet<>(generated).size() == generated.size() && generated.size() == 64,
+                "preparation deduplicates and never exceeds the 64-chunk hard bound");
+        check(preparation.residency().chunkAtBlock(0, 0) == chunk,
+                "prepared LevelChunk values are retained for loaded-only search reads");
+
+        DestinationSafety.ChunkPreparation failing = DestinationSafety.ChunkPreparation.controlled(
+                0, 0, 0, 0, ignored -> { throw new IllegalStateException("generation failed"); });
+        boolean failedLoudly = false;
+        try {
+            failing.prepare(SpawnDestination.PREPARATION_CHUNKS_PER_VISIT, 10);
+        } catch (IllegalStateException generationFailure) {
+            failedLoudly = generationFailure.getMessage().contains("generation failed");
+        }
+        check(failedLoudly && !failing.complete(),
+                "terrain generation failures escape to the command's existing internal-error boundary");
+    }
+
+    private static void temporaryChunkTicketsOwnResidencyUntilExplicitClose() {
+        List<String> events = new ArrayList<>();
+        Set<Long> retained = new HashSet<>();
+        DestinationSafety.TicketAccess access = new DestinationSafety.TicketAccess() {
+            @Override public void retain(long chunk) {
+                check(retained.add(chunk), "one preparation owns one ticket per exact chunk");
+                events.add("retain:" + chunk);
+            }
+            @Override public Object load(long chunk) {
+                check(retained.contains(chunk), "temporary ticket is installed before synchronous generation");
+                events.add("load:" + chunk);
+                return new Object();
+            }
+            @Override public void release(long chunk) {
+                check(retained.remove(chunk), "release removes the exact ticket owned by this preparation");
+                events.add("release:" + chunk);
+            }
+        };
+        DestinationSafety.ChunkPreparation preparation = DestinationSafety.ChunkPreparation.controlled(
+                0, 31, 0, 15, access);
+        check(preparation.prepare(2, 2) == 2 && retained.size() == 2,
+                "prepared chunks stay explicitly ticketed across later ticks");
+        check(events.get(0).startsWith("retain:") && events.get(1).startsWith("load:"),
+                "ticket installation precedes generation for each chunk");
+        preparation.close();
+        preparation.close();
+        check(retained.isEmpty() && events.stream().filter(event -> event.startsWith("release:")).count() == 2,
+                "terminal cleanup releases every ticket exactly once and close is idempotent");
+
+        Set<Long> failingRetained = new HashSet<>();
+        DestinationSafety.ChunkPreparation failing = DestinationSafety.ChunkPreparation.controlled(
+                0, 0, 0, 0, new DestinationSafety.TicketAccess() {
+                    @Override public void retain(long chunk) { failingRetained.add(chunk); }
+                    @Override public Object load(long chunk) { throw new IllegalStateException("generation failed"); }
+                    @Override public void release(long chunk) { failingRetained.remove(chunk); }
+                });
+        boolean failed = false;
+        try {
+            failing.prepare(1, 1);
+        } catch (IllegalStateException expected) {
+            failed = expected.getMessage().contains("generation failed");
+        }
+        check(failed && failingRetained.isEmpty(),
+                "throwing generation immediately releases the ticket installed for the failed chunk");
+
+        Set<Long> retainedBeforeTicketFailure = new HashSet<>();
+        AtomicInteger retainCalls = new AtomicInteger();
+        DestinationSafety.ChunkPreparation failingRetain = DestinationSafety.ChunkPreparation.controlled(
+                0, 31, 0, 0, new DestinationSafety.TicketAccess() {
+                    @Override public void retain(long chunk) {
+                        if (retainCalls.incrementAndGet() == 2) throw new IllegalStateException("ticket failed");
+                        retainedBeforeTicketFailure.add(chunk);
                     }
-                    @Override public SpawnDestination.ProbeStep step(int availableWorldWork) {
-                        blockReads.incrementAndGet();
-                        return new SpawnDestination.ProbeStep(SpawnDestination.ProbeOutcome.REJECTED, 1);
+                    @Override public Object load(long chunk) { return new Object(); }
+                    @Override public void release(long chunk) { retainedBeforeTicketFailure.remove(chunk); }
+                });
+        boolean retainFailed = false;
+        try {
+            failingRetain.prepare(2, 2);
+        } catch (IllegalStateException expected) {
+            retainFailed = expected.getMessage().contains("ticket failed");
+        }
+        check(retainFailed && retainedBeforeTicketFailure.isEmpty(),
+                "ticket-install failure releases every earlier chunk owned by the preparation");
+
+        Set<Long> retryableRetained = new HashSet<>();
+        AtomicInteger releaseAttempts = new AtomicInteger();
+        long transientFailure = DestinationSafety.chunkKey(0, 1);
+        DestinationSafety.ChunkPreparation retryableClose = DestinationSafety.ChunkPreparation.controlled(
+                0, 0, 0, 47, new DestinationSafety.TicketAccess() {
+                    @Override public void retain(long chunk) { retryableRetained.add(chunk); }
+                    @Override public Object load(long chunk) { return new Object(); }
+                    @Override public void release(long chunk) {
+                        releaseAttempts.incrementAndGet();
+                        if (chunk == transientFailure && retryableRetained.size() == 2) {
+                            throw new IllegalStateException("release failed once");
+                        }
+                        retryableRetained.remove(chunk);
                     }
-                }, false, cold);
-        check(start.complete() && start.selection().outcome() == SpawnDestination.Outcome.UNSAFE,
-                "whole-cold search volume rejects immediately");
-        check(chunkProbes.get() == cold.chunkProbes() && chunkProbes.get() <= 64,
-                "whole-cold residency snapshot uses a bounded one-probe-per-chunk rectangle");
-        check(candidateBegins.get() == 0 && blockReads.get() == 0,
-                "whole-cold rejection performs zero candidate and block work");
+                });
+        check(retryableClose.prepare(3, 3) == 3, "retry fixture retains three exact chunks");
+        boolean releaseFailed = false;
+        try {
+            retryableClose.close();
+        } catch (IllegalStateException expected) {
+            releaseFailed = expected.getMessage().contains("release failed once");
+        }
+        check(releaseFailed && retryableRetained.equals(Set.of(transientFailure))
+                        && releaseAttempts.get() == 3,
+                "failed release remains owned while every other ticket is still attempted");
+        retryableClose.close();
+        retryableClose.close();
+        check(retryableRetained.isEmpty() && releaseAttempts.get() == 4,
+                "later close retries only the failed ticket and successful releases remain exactly once");
     }
 
     private static void residencySnapshotRetainsChunkValuesForLoadedOnlyReads() {
@@ -466,6 +636,83 @@ public final class DestinationsTest {
         check(totalWorldWork > 0, "search and final rejection are charged to weighted world work");
     }
 
+    private static void edgeAcceptancePreparesExactFinalFiveByFiveBeforeFreshValidation() {
+        Object searchChunk = new Object();
+        DestinationSafety.ChunkPreparation searchPreparation = DestinationSafety.ChunkPreparation.controlled(
+                -56, 56, -56, 56, ignored -> searchChunk);
+        check(searchPreparation.prepare(64, 64) == 64, "edge fixture prepares the bounded search rectangle");
+
+        SpawnDestination.CandidateProbe acceptedEdge = new SpawnDestination.CandidateProbe() {
+            @Override public void begin(SpawnDestination.Offset offset, SpawnDestination.ProbeKind kind) {
+                check(offset.equals(new SpawnDestination.Offset(48, 0, 0)),
+                        "fixture accepts the positive search boundary");
+            }
+            @Override public SpawnDestination.ProbeStep step(int availableWorldWork) {
+                return new SpawnDestination.ProbeStep(SpawnDestination.ProbeOutcome.FITS, 0);
+            }
+        };
+        List<Long> finalLoads = new ArrayList<>();
+        Set<Long> finalTickets = new HashSet<>();
+        List<String> order = new ArrayList<>();
+        final DestinationSafety.ChunkPreparation[] finalPreparation = new DestinationSafety.ChunkPreparation[1];
+        SpawnDestination.Pending pending = SpawnDestination.Pending.controlledPreparing(
+                List.of(new SpawnDestination.Offset(48, 0, 0)).iterator(), false, searchPreparation,
+                ignored -> acceptedEdge, BlockPos.ZERO, 1,
+                position -> {
+                    List<Long> exact = DestinationSafety.destinationChunks(position.x, position.z);
+                    DestinationSafety.ChunkPreparation preparation = DestinationSafety.ChunkPreparation.controlled(
+                            (int) Math.floor(position.x) - 32, (int) Math.floor(position.x) + 32,
+                            (int) Math.floor(position.z) - 32, (int) Math.floor(position.z) + 32,
+                            new DestinationSafety.TicketAccess() {
+                                @Override public void retain(long chunk) { finalTickets.add(chunk); }
+                                @Override public Object load(long chunk) {
+                                    check(exact.contains(chunk), "final phase loads only the exact destination 5x5");
+                                    finalLoads.add(chunk);
+                                    order.add("load");
+                                    return new Object();
+                                }
+                                @Override public void release(long chunk) { finalTickets.remove(chunk); }
+                            });
+                    finalPreparation[0] = preparation;
+                    return preparation;
+                },
+                (feet, residency) -> new SpawnDestination.CandidateProbe() {
+                    @Override public void begin(SpawnDestination.Offset offset, SpawnDestination.ProbeKind kind) {
+                        check(finalPreparation[0].complete(),
+                                "fresh live validation begins only after exact final preparation completes");
+                        check(residency.coversBlockRange(feet.getX() - 1, feet.getX() + 1,
+                                        feet.getZ() - 1, feet.getZ() + 1),
+                                "fresh validation reads the exact currently ticketed final set");
+                        order.add("validate");
+                    }
+                    @Override public SpawnDestination.ProbeStep step(int availableWorldWork) {
+                        return new SpawnDestination.ProbeStep(SpawnDestination.ProbeOutcome.FITS, 1);
+                    }
+                });
+
+        int visits = 0;
+        while (!pending.complete()) {
+            int before = finalLoads.size();
+            SpawnDestination.Tick used = pending.tick(1, 1_000);
+            check(finalLoads.size() - before <= SpawnDestination.PREPARATION_CHUNKS_PER_VISIT,
+                    "final destination loading remains resumable at two chunk requests per visit");
+            check(used.candidatesStarted() <= 1 && used.worldWork() <= 1_000,
+                    "edge completion remains inside its assigned scheduler slice");
+            check(++visits < 100, "edge completion makes bounded structural progress");
+        }
+        List<Long> expected = DestinationSafety.destinationChunks(48.5, 0.5);
+        check(finalLoads.equals(expected) && finalLoads.size() == 25
+                        && new HashSet<>(finalLoads).size() == 25,
+                "accepted +48 edge loads every exact final 5x5 chunk once");
+        check(finalLoads.stream().anyMatch(key -> (int) (key >> 32) >= 4),
+                "exact final loading extends beyond the initial search rectangle at the +48 edge");
+        check(order.getLast().equals("validate")
+                        && pending.result().outcome() == SpawnDestination.Outcome.ACCEPT,
+                "fresh validation follows final loading and is the last gate before accepted completion");
+        pending.close();
+        check(finalTickets.isEmpty(), "closing accepted pending work releases final destination tickets");
+    }
+
     private static void oversizedModdedRootsKeepTheSnapshotHardBounded() {
         check(SpawnDestination.rootGeometrySupported(14, 16), "documented maximum root geometry is supported");
         check(!SpawnDestination.rootGeometrySupported(15, 16), "width above policy is rejected before snapshot growth");
@@ -488,8 +735,10 @@ public final class DestinationsTest {
                 "production DestinationSafety probe is wired into the incremental search contract");
         check(Commands.SEARCH_CANDIDATES_PER_TICK == 4_096
                         && Commands.SEARCH_WORLD_WORK_PER_TICK
-                        == TeleportService.LIFECYCLE_CAPTURE_WORK + Commands.MAX_IMMEDIATE_ROUTE_WORK,
-                "candidate starts retain a fixed ceiling while world-work follows the enforced maximum route");
+                        == TeleportService.LIFECYCLE_CAPTURE_WORK
+                        + Commands.MAX_PENDING_TICKET_RELEASE_WORK
+                        + Commands.MAX_IMMEDIATE_ROUTE_WORK,
+                "candidate starts stay fixed while world work includes cleanup and the maximum route");
         AtomicInteger directRangeChecks = new AtomicInteger();
         SpawnDestination.CandidateProbe probe = new SpawnDestination.CandidateProbe() {
             @Override public void begin(SpawnDestination.Offset offset, SpawnDestination.ProbeKind kind) {
@@ -503,8 +752,8 @@ public final class DestinationsTest {
         };
 
         Long before = allocatedBytes();
-        SpawnDestination.Search search = SpawnDestination.start(
-                SpawnDestination.offsets(48, 48).iterator(), probe, false, resident).search();
+        SpawnDestination.Search search = new SpawnDestination.Search(
+                SpawnDestination.offsets(48, 48).iterator(), probe, false);
         while (!search.complete()) search.tick(4_096, 4_096);
         Long after = allocatedBytes();
         check(search.selection().candidatesVisited() == 912_673,

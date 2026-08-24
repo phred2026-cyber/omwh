@@ -9,7 +9,9 @@ import net.minecraft.server.permissions.LevelBasedPermissionSet;
 import net.minecraft.world.level.block.Blocks;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.List;
+import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -23,7 +25,13 @@ public final class CommandsAndCooldownsTest {
         teleportOutcomesUseInternalFailureAndPartialPolicies();
         disabledSpawnFeedbackDoesNotClaimAWorldIsMissing();
         pendingSpawnLifecycleRejectsDuplicatesAndCompletesExactlyOnce();
+        pendingWorkClosureCoversEveryTerminalExit();
+        pendingCleanupIsAccountedAndRetried();
+        productionCancellationCallersOwnCleanupAccounting();
+        productionSpawnRouteDelegatesTicketOwnership();
+        pendingGenerationFailureRetiresAndReleasesExactlyOnce();
         pendingSpawnSchedulingSharesOneFairServerWideBudget();
+        preparationProgressYieldsAfterOneQuantumPerSchedulerTick();
         productionPendingSchedulerSlicesRevalidationAndRetiresStaleWork();
         commandsTickPassesASeparatePendingAdvancementSlice();
         productionCoordinatorOwnsLifecycleFinalGatesAndDispatch();
@@ -31,7 +39,7 @@ public final class CommandsAndCooldownsTest {
         admissionAndLifecycleWorkShareHardAggregateAllowances();
         zeroProgressKeepsTheBlockedRequestNext();
         pendingCommandAdmissionCancelsOnlyCompetingTeleports();
-        System.out.println("CommandsAndCooldownsTest PASS (13 behavior groups)");
+        System.out.println("CommandsAndCooldownsTest PASS (19 behavior groups)");
     }
 
     private static void forceSyntaxFollowsTheServerSetting() {
@@ -247,13 +255,304 @@ public final class CommandsAndCooldownsTest {
 
         check(pending.add("disconnect", (candidateBudget, worldBudget) ->
                 Commands.PendingStep.pending(1, 1)), "disconnect search added");
-        pending.remove("disconnect");
+        pending.cancel("disconnect", new Commands.TickWorkAllowance(1));
         check(pending.size() == 0, "disconnect cleanup is bounded direct removal");
         check(pending.add("a", (candidateBudget, worldBudget) -> Commands.PendingStep.pending(1, 1))
                         && pending.add("b", (candidateBudget, worldBudget) -> Commands.PendingStep.pending(1, 1)),
                 "stop-cleanup searches added");
-        pending.clear();
+        pending.clearTerminal();
         check(pending.size() == 0, "server-stop cleanup clears all pending searches");
+    }
+
+    private static void pendingWorkClosureCoversEveryTerminalExit() {
+        class ClosingWork implements Commands.PendingWork<String> {
+            private final boolean complete;
+            private final AtomicInteger closes;
+            ClosingWork(boolean complete, AtomicInteger closes) {
+                this.complete = complete;
+                this.closes = closes;
+            }
+            @Override public Commands.PendingStep<String> step(int candidateBudget, int worldWorkBudget) {
+                return complete ? Commands.PendingStep.complete("done", 0, 0)
+                        : Commands.PendingStep.pending(1, 1);
+            }
+            @Override public void close() { closes.incrementAndGet(); }
+        }
+
+        AtomicInteger terminalCloses = new AtomicInteger();
+        Commands.PendingSearches<String, String> terminal = new Commands.PendingSearches<>();
+        check(terminal.add("terminal", new ClosingWork(true, terminalCloses)), "terminal work added");
+        terminal.tick(1, 1, value -> check(terminalCloses.get() == 0,
+                "completion callback runs while accepted destination tickets are still retained"));
+        check(terminalCloses.get() == 1, "normal terminal completion closes after its callback");
+
+        AtomicInteger removedCloses = new AtomicInteger();
+        Commands.PendingSearches<String, String> removed = new Commands.PendingSearches<>();
+        removed.add("home-or-force", new ClosingWork(false, removedCloses));
+        removed.cancel("home-or-force", new Commands.TickWorkAllowance(1));
+        check(removedCloses.get() == 1, "home, force, disconnect, and respawn removal closes pending work");
+
+        AtomicInteger clearedCloses = new AtomicInteger();
+        Commands.PendingSearches<String, String> cleared = new Commands.PendingSearches<>();
+        cleared.add("one", new ClosingWork(false, clearedCloses));
+        cleared.add("two", new ClosingWork(false, clearedCloses));
+        cleared.clearTerminal();
+        check(clearedCloses.get() == 2, "server stop closes every pending request");
+
+        AtomicInteger callbackFailureCloses = new AtomicInteger();
+        Commands.PendingSearches<String, String> callbackFailure = new Commands.PendingSearches<>();
+        callbackFailure.add("callback-failure", new ClosingWork(true, callbackFailureCloses));
+        boolean threw = false;
+        try {
+            callbackFailure.tick(1, 1, value -> { throw new IllegalStateException("completion failed"); });
+        } catch (IllegalStateException expected) {
+            threw = expected.getMessage().contains("completion failed");
+        }
+        check(threw && callbackFailureCloses.get() == 1 && callbackFailure.size() == 0,
+                "exceptional terminal callbacks still retire and close exactly once");
+    }
+
+    private static void pendingCleanupIsAccountedAndRetried() {
+        class AccountedClose implements Commands.PendingWork<String> {
+            private final AtomicInteger closes = new AtomicInteger();
+            private boolean failOnce;
+            private boolean released;
+            AccountedClose(boolean failOnce) { this.failOnce = failOnce; }
+            @Override public Commands.PendingStep<String> step(int candidateBudget, int worldWorkBudget) {
+                return Commands.PendingStep.complete("done", 1, 1);
+            }
+            @Override public int closeWork() { return released ? 0 : 7; }
+            @Override public void close() {
+                closes.incrementAndGet();
+                if (failOnce) {
+                    failOnce = false;
+                    throw new IllegalStateException("release failed once");
+                }
+                released = true;
+            }
+        }
+
+        AccountedClose terminalWork = new AccountedClose(false);
+        Commands.PendingSearches<String, String> terminal = new Commands.PendingSearches<>();
+        terminal.add("terminal", terminalWork);
+        Commands.PendingTick terminalUsed = terminal.tick(1, 8,
+                value -> check(terminalWork.closes.get() == 0,
+                        "accepted tickets remain through the completion callback"));
+        check(terminalUsed.worldWorkUsed() == 8 && terminalWork.closes.get() == 1,
+                "terminal ticket removal is charged after completion dispatch");
+
+        AccountedClose removedWork = new AccountedClose(false);
+        Commands.PendingSearches<String, String> removed = new Commands.PendingSearches<>();
+        removed.add("remove", removedWork);
+        Commands.TickWorkAllowance removalAllowance = new Commands.TickWorkAllowance(7);
+        removed.cancel("remove", removalAllowance);
+        check(removalAllowance.remaining() == 0 && removedWork.closes.get() == 1,
+                "direct cancellation reports its exact ticket-removal work");
+
+        AccountedClose firstClear = new AccountedClose(false);
+        AccountedClose secondClear = new AccountedClose(false);
+        Commands.PendingSearches<String, String> cleared = new Commands.PendingSearches<>();
+        cleared.add("first", firstClear);
+        cleared.add("second", secondClear);
+        cleared.clearTerminal();
+        check(firstClear.closes.get() == 1 && secondClear.closes.get() == 1,
+                "server-stop cleanup reports every pending ticket removal");
+
+        AccountedClose retryWork = new AccountedClose(true);
+        Commands.PendingSearches<String, String> retry = new Commands.PendingSearches<>();
+        retry.add("retry", retryWork);
+        Commands.PendingTick failedClose = retry.tick(1, 8, ignored -> { });
+        check(failedClose.worldWorkUsed() == 8 && retry.cleanupSize() == 1,
+                "failed ticket removal remains owned after its charged attempt");
+        Commands.PendingTick successfulRetry = retry.tick(1, 7, ignored -> { });
+        check(successfulRetry.worldWorkUsed() == 7 && retry.cleanupSize() == 0
+                        && retryWork.closes.get() == 2,
+                "later scheduler tick charges and completes the retained cleanup retry");
+    }
+
+    private static void productionCancellationCallersOwnCleanupAccounting() {
+        class AccountedClose implements Commands.PendingWork<Void> {
+            private final AtomicInteger closes = new AtomicInteger();
+            private final int work;
+            private boolean failOnce;
+            private boolean released;
+            private java.util.function.BooleanSupplier releaseAllowed = () -> true;
+            AccountedClose(boolean failOnce) { this(failOnce, 7); }
+            AccountedClose(boolean failOnce, int work) {
+                this.failOnce = failOnce;
+                this.work = work;
+            }
+            AccountedClose releaseOnlyWhen(java.util.function.BooleanSupplier allowed) {
+                releaseAllowed = allowed;
+                return this;
+            }
+            @Override public Commands.PendingStep<Void> step(int candidateBudget, int worldWorkBudget) {
+                return Commands.PendingStep.pending(1, 1);
+            }
+            @Override public int closeWork() { return released ? 0 : work; }
+            @Override public void close() {
+                check(releaseAllowed.getAsBoolean(), "cleanup allowance is claimed before ticket release");
+                closes.incrementAndGet();
+                if (failOnce) {
+                    failOnce = false;
+                    throw new IllegalStateException("release failed once");
+                }
+                released = true;
+            }
+        }
+
+        java.util.function.Function<Integer, Commands> commandsWithBudget = limit -> {
+            OmwhConfig config = new OmwhConfig();
+            return new Commands(config, new Cooldowns(config, () -> 1_000L), limit);
+        };
+
+        Commands home = commandsWithBudget.apply(7);
+        AccountedClose homeWork = new AccountedClose(false)
+                .releaseOnlyWhen(() -> home.remainingServerWork() == 0);
+        UUID homePlayer = UUID.randomUUID();
+        check(home.enqueuePending(homePlayer, homeWork), "/home cancellation fixture enqueued");
+        home.cancelPendingForHome(homePlayer);
+        check(homeWork.closes.get() == 1 && home.remainingServerWork() == 0,
+                "/home claims exact cleanup work before releasing pending terrain");
+
+        Commands forcedSpawn = commandsWithBudget.apply(7);
+        AccountedClose forcedWork = new AccountedClose(false)
+                .releaseOnlyWhen(() -> forcedSpawn.remainingServerWork() == 0);
+        UUID forcedPlayer = UUID.randomUUID();
+        check(forcedSpawn.enqueuePending(forcedPlayer, forcedWork), "forced /spawn cancellation fixture enqueued");
+        forcedSpawn.cancelPendingForForcedSpawn(forcedPlayer);
+        check(forcedWork.closes.get() == 1 && forcedSpawn.remainingServerWork() == 0,
+                "forced /spawn claims exact cleanup work before continuing its route");
+
+        OmwhConfig routeConfig = new OmwhConfig();
+        Commands routeBudget = new Commands(routeConfig,
+                new Cooldowns(routeConfig, () -> 1_000L));
+        AccountedClose maximumCancellation = new AccountedClose(false,
+                Commands.MAX_PENDING_TICKET_RELEASE_WORK);
+        UUID routePlayer = UUID.randomUUID();
+        check(routeBudget.enqueuePending(routePlayer, maximumCancellation),
+                "maximum forced-route cancellation fixture enqueued");
+        routeBudget.cancelPendingForForcedSpawn(routePlayer);
+        check(routeBudget.remainingServerWork()
+                        >= TeleportService.LIFECYCLE_CAPTURE_WORK + Commands.MAX_IMMEDIATE_ROUTE_WORK,
+                "maximum ticket cleanup leaves the promised forced route inside the same shared allowance");
+
+        Commands disconnect = commandsWithBudget.apply(7);
+        AccountedClose disconnectWork = new AccountedClose(false)
+                .releaseOnlyWhen(() -> disconnect.remainingServerWork() == 0);
+        UUID disconnectedPlayer = UUID.randomUUID();
+        check(disconnect.enqueuePending(disconnectedPlayer, disconnectWork), "disconnect fixture enqueued");
+        disconnect.removePending(disconnectedPlayer);
+        check(disconnectWork.closes.get() == 1 && disconnect.remainingServerWork() == 0,
+                "disconnect cleanup is charged through the Commands allowance");
+
+        Commands respawn = commandsWithBudget.apply(7);
+        AccountedClose respawnWork = new AccountedClose(false)
+                .releaseOnlyWhen(() -> respawn.remainingServerWork() == 0);
+        UUID respawnedPlayer = UUID.randomUUID();
+        check(respawn.enqueuePending(respawnedPlayer, respawnWork), "respawn fixture enqueued");
+        respawn.respawnPending(respawnedPlayer);
+        check(respawnWork.closes.get() == 1 && respawn.remainingServerWork() == 0,
+                "respawn cleanup is charged through the Commands allowance");
+
+        Commands deferred = commandsWithBudget.apply(7);
+        AccountedClose priorWork = new AccountedClose(false, 1)
+                .releaseOnlyWhen(() -> deferred.remainingServerWork() == 6);
+        UUID priorPlayer = UUID.randomUUID();
+        check(deferred.enqueuePending(priorPlayer, priorWork), "prior cleanup fixture enqueued");
+        deferred.removePending(priorPlayer);
+        AccountedClose deferredWork = new AccountedClose(false)
+                .releaseOnlyWhen(() -> deferred.remainingServerWork() == 0);
+        UUID deferredPlayer = UUID.randomUUID();
+        check(deferred.enqueuePending(deferredPlayer, deferredWork), "deferred cleanup fixture enqueued");
+        deferred.cancelPendingForHome(deferredPlayer);
+        check(deferredWork.closes.get() == 0,
+                "live cancellation transfers cleanup when its exact work cannot be claimed");
+        deferred.tick();
+        check(deferredWork.closes.get() == 0,
+                "the exhausted live tick does not release transferred cleanup outside its allowance");
+        deferred.tick();
+        check(deferredWork.closes.get() == 1,
+                "a later shared-budget tick claims transferred cleanup before releasing it");
+
+        Commands stopped = commandsWithBudget.apply(0);
+        AccountedClose stoppedFirst = new AccountedClose(true);
+        AccountedClose stoppedSecond = new AccountedClose(false);
+        check(stopped.enqueuePending(UUID.randomUUID(), stoppedFirst)
+                        && stopped.enqueuePending(UUID.randomUUID(), stoppedSecond),
+                "server-stop cleanup fixtures enqueued");
+        stopped.clearPending();
+        check(stoppedFirst.closes.get() == 2 && stoppedSecond.closes.get() == 1,
+                "SERVER_STOPPED exhaustively retries and releases every ticket without a later tick");
+    }
+
+    private static void productionSpawnRouteDelegatesTicketOwnership() {
+        Set<Long> retained = new HashSet<>();
+        AtomicInteger releases = new AtomicInteger();
+        DestinationSafety.ChunkPreparation preparation = DestinationSafety.ChunkPreparation.controlled(
+                0, 0, 0, 0, new DestinationSafety.TicketAccess() {
+                    @Override public void retain(long chunk) { retained.add(chunk); }
+                    @Override public Object load(long chunk) { return new Object(); }
+                    @Override public void release(long chunk) {
+                        check(retained.remove(chunk), "production route releases its exact retained ticket");
+                        releases.incrementAndGet();
+                    }
+                });
+        SpawnDestination.Pending pending = SpawnDestination.Pending.controlledPreparing(
+                SpawnDestination.offsets(0, 0).iterator(), false, preparation,
+                ignored -> new SpawnDestination.CandidateProbe() {
+                    @Override public void begin(SpawnDestination.Offset offset, SpawnDestination.ProbeKind kind) { }
+                    @Override public SpawnDestination.ProbeStep step(int availableWorldWork) {
+                        return new SpawnDestination.ProbeStep(SpawnDestination.ProbeOutcome.REJECTED, 1);
+                    }
+                }, BlockPos.ZERO, 1,
+                feet -> { throw new AssertionError("unsafe search must not start final preparation"); });
+
+        Commands.PendingWork<SpawnDestination.Result> route = Commands.pendingSpawnRoute(pending);
+
+        OmwhConfig config = new OmwhConfig();
+        Commands commands = new Commands(config, new Cooldowns(config, () -> 1_000L));
+        List<SpawnDestination.Result> completions = new ArrayList<>();
+        UUID player = UUID.randomUUID();
+        check(commands.enqueuePending(player, commands.createSpawnCoordinator(
+                        route,
+                        () -> TeleportService.LifecycleStatus.CURRENT,
+                        value -> true,
+                        value -> true,
+                        completions::add,
+                        status -> { throw new AssertionError("current lifecycle cannot reject"); })),
+                "real /spawn pending route enqueued through Commands");
+
+        commands.tick();
+        check(retained.size() == 1 && releases.get() == 0 && completions.isEmpty(),
+                "terrain tickets transfer to the pending Commands owner between ticks");
+        commands.tick();
+        check(retained.size() == 1 && releases.get() == 0 && completions.isEmpty(),
+                "terrain tickets remain owned while the prepared search is still pending");
+        commands.tick();
+        check(retained.isEmpty() && releases.get() == 1
+                        && completions.size() == 1
+                        && completions.getFirst().outcome() == SpawnDestination.Outcome.UNSAFE,
+                "terminal production routing releases owned terrain exactly once after completion");
+    }
+
+    private static void pendingGenerationFailureRetiresAndReleasesExactlyOnce() {
+        AtomicInteger failures = new AtomicInteger();
+        AtomicInteger closes = new AtomicInteger();
+        Commands.PendingWork<Void> guarded = Commands.guardPending(new Commands.PendingWork<Void>() {
+            @Override public Commands.PendingStep<Void> step(int candidateBudget, int worldWorkBudget) {
+                throw new IllegalStateException("generation failed");
+            }
+            @Override public void close() { closes.incrementAndGet(); }
+        }, failure -> failures.incrementAndGet());
+
+        Commands.PendingSearches<String, Void> pending = new Commands.PendingSearches<>();
+        check(pending.add("generation", guarded), "guarded production failure path added");
+        Commands.PendingTick used = pending.tick(1, 11, ignored -> { });
+        check(used.itemsCompleted() == 1 && used.candidatesUsed() == 1 && used.worldWorkUsed() == 11,
+                "generation failure retires while conservatively charging its complete assigned slice");
+        check(failures.get() == 1 && closes.get() == 1 && pending.size() == 0,
+                "generation failure reports once, releases tickets once, and leaves no pending retry");
     }
 
     private static void pendingSpawnSchedulingSharesOneFairServerWideBudget() {
@@ -275,7 +574,8 @@ public final class CommandsAndCooldownsTest {
                         && first.worldWorkUsed() <= Commands.SEARCH_WORLD_WORK_PER_TICK,
                 "all players share one aggregate server-wide allowance");
         for (int player = 0; player < players; player++) {
-            check(progress[player] > 0, "round-robin gives every pending player progress in a busy tick");
+            check(progress[player] == 1,
+                    "each pending request receives exactly one scheduler visit in a server tick");
         }
 
         int[] before = progress.clone();
@@ -285,6 +585,26 @@ public final class CommandsAndCooldownsTest {
         int advanced = 0;
         for (int player = 0; player < players; player++) if (progress[player] > before[player]) advanced++;
         check(advanced == 50, "round-robin advances distinct players before returning to the front");
+    }
+
+    private static void preparationProgressYieldsAfterOneQuantumPerSchedulerTick() {
+        Commands.PendingSearches<String, Void> pending = new Commands.PendingSearches<>();
+        AtomicInteger firstVisits = new AtomicInteger();
+        AtomicInteger secondVisits = new AtomicInteger();
+        check(pending.add("first", (candidateBudget, worldBudget) -> {
+                    firstVisits.incrementAndGet();
+                    return Commands.PendingStep.pending(0, SpawnDestination.PREPARATION_CHUNKS_PER_VISIT);
+                }) && pending.add("second", (candidateBudget, worldBudget) -> {
+                    secondVisits.incrementAndGet();
+                    return Commands.PendingStep.pending(0, SpawnDestination.PREPARATION_CHUNKS_PER_VISIT);
+                }), "preparing routes added to the production scheduler");
+
+        Commands.PendingTick used = pending.tick(Commands.SEARCH_CANDIDATES_PER_TICK, 100, ignored -> { });
+        check(firstVisits.get() == 1 && secondVisits.get() == 1,
+                "each preparing route receives one fixed chunk quantum per server tick");
+        check(used.candidatesUsed() == 0
+                        && used.worldWorkUsed() == 2 * SpawnDestination.PREPARATION_CHUNKS_PER_VISIT,
+                "preparation is charged once to aggregate world work without pretending chunks are candidates");
     }
 
     private static void productionPendingSchedulerSlicesRevalidationAndRetiresStaleWork() {
@@ -340,13 +660,13 @@ public final class CommandsAndCooldownsTest {
                         && Commands.shouldLoadDestinationChunks(false),
                 "incremental spawn skips broad chunk generation while immediate routes retain preparation");
         long revalidationWorldWork = totalWorldWork - 46_372;
-        check(revalidationWorldWork == 46_376,
-                "maximum live revalidation charges four final snapshot probes plus safety work");
-        check(totalWorldWork == 92_748,
-                "search, final snapshot probes, and fresh revalidation share production accounting");
+        check(revalidationWorldWork == 46_372,
+                "maximum live revalidation charges safety work without inventing a second chunk capture");
+        check(totalWorldWork == 92_744,
+                "search and fresh revalidation share production accounting over retained prepared chunks");
         check(completions.size() == 4
                         && completions.getLast().outcome() == SpawnDestination.Outcome.ACCEPT
-                        && completions.getLast().incrementalDestinationReady(),
+                        && completions.getLast().destinationPrepared(),
                 "stale and accepted lifecycle completions are each delivered exactly once");
         check(schedulerTicks > 1,
                 "maximum production search plus live revalidation remains genuinely resumable");
@@ -371,8 +691,10 @@ public final class CommandsAndCooldownsTest {
         check(Commands.PENDING_ADVANCEMENT_WORK_PER_TICK
                         == TeleportService.LIFECYCLE_VALIDATION_WORK
                         + Commands.PENDING_ROUTE_WORK_SLICE
-                        + TeleportService.COMPLETION_WORK,
-                "pending slice reserves lifecycle validation, bounded route advancement, and final completion");
+                        + Commands.MAX_EFFECT_DISPATCHES
+                        + TeleportService.COMPLETION_WORK
+                        + Commands.MAX_PENDING_TICKET_RELEASE_WORK,
+                "pending slice reserves lifecycle, route, effects, completion, and ticket cleanup");
     }
 
     private static void productionCoordinatorOwnsLifecycleFinalGatesAndDispatch() {
@@ -451,15 +773,33 @@ public final class CommandsAndCooldownsTest {
         commands.tick();
         check(events.equals(List.of(config.passengerTreeTooLargeMessage)),
                 "oversized pending lifecycle retires with explicit passenger-cap feedback");
+
+        AtomicInteger ticketReleases = new AtomicInteger();
+        Commands.PendingWork<String> retainedRoute = new Commands.PendingWork<>() {
+            @Override public Commands.PendingStep<String> step(int candidateBudget, int worldWorkBudget) {
+                return Commands.PendingStep.pending(1, 1);
+            }
+            @Override public void close() { ticketReleases.incrementAndGet(); }
+        };
+        UUID stalePlayer = UUID.randomUUID();
+        check(commands.enqueuePending(stalePlayer, commands.createSpawnCoordinator(
+                        retainedRoute,
+                        () -> TeleportService.LifecycleStatus.STALE,
+                        value -> true, value -> true, value -> events.add("complete"),
+                        status -> { })),
+                "ticket-owning production coordinator enqueued");
+        commands.tick();
+        check(ticketReleases.get() == 1,
+                "production lifecycle rejection closes its route and releases temporary tickets");
     }
 
     private static void admissionAndLifecycleWorkShareHardAggregateAllowances() {
-        int admissionLimit = SpawnDestination.ADMISSION_SNAPSHOT_PROBE_WORK
+        int admissionLimit = SpawnDestination.PENDING_START_WORK
                 + TeleportService.LIFECYCLE_CAPTURE_WORK;
         Commands.TickWorkAllowance admission = new Commands.TickWorkAllowance(admissionLimit);
-        check(admission.claim(SpawnDestination.ADMISSION_SNAPSHOT_PROBE_WORK)
+        check(admission.claim(SpawnDestination.PENDING_START_WORK)
                         && admission.claim(TeleportService.LIFECYCLE_CAPTURE_WORK),
-                "one admission snapshot and one maximum valid lifecycle capture fit the aggregate allowance");
+                "one pending-plan start and one maximum valid lifecycle capture fit the aggregate allowance");
         check(!admission.claim(1) && admission.remaining() == 0,
                 "another synchronous probe cannot exceed the per-tick aggregate allowance");
         admission.reset();

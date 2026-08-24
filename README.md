@@ -18,7 +18,7 @@ Cross-dimension homes are enabled by default. Server owners can disable them wit
 
 `/spawn` uses the destination allowed for the player's current dimension. Overworld spawn is enabled by default; Nether, End, and modded-dimension spawn destinations are disabled by default. A disabled dimension may fall back to Overworld spawn only when both cross-dimension teleporting and Overworld spawn are enabled.
 
-Nether destinations use Minecraft's normal coordinate scaling. End destinations use the vanilla End arrival platform. For normal Overworld, Nether, and modded-dimension travel, OMWH searches already-loaded chunks within 48 blocks of the spawn anchor on each axis. It never loads or generates terrain, so `/spawn` may refuse if the relevant chunks are not loaded. Pregeneration alone is not enough once Minecraft unloads them.
+Nether destinations use Minecraft's normal coordinate scaling. End destinations use the vanilla End arrival platform. For normal Overworld, Nether, and modded-dimension travel, OMWH loads the terrain it needs before looking for a safe spot within 48 blocks of the spawn anchor on each axis.
 
 ### Vehicles and friends
 
@@ -69,7 +69,7 @@ See [CONFIGURATION.md](CONFIGURATION.md) for all settings, defaults, messages, c
 - Cross-dimension `/home` is enabled by default.
 - Nether, End, and modded-dimension spawn destinations are disabled by default.
 - Cooldowns and pending searches clear when a player disconnects.
-- Normal `/spawn` searches loaded chunks only within 48 blocks of its anchor and may refuse when the relevant spawn chunks are not loaded.
+- Normal `/spawn` may stay pending while OMWH prepares terrain and checks for a safe destination.
 
 ## Links
 
