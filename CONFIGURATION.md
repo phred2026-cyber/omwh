@@ -57,7 +57,11 @@ In the Overworld, disabling `enableOverworldSpawn` denies `/spawn`. In the Nethe
 
 Force is available to every player who can use the parent command when `enableForceOverride` is enabled. It bypasses destination safety and vehicle-size checks only. It does not bypass cooldowns, missing homes, dimension routing, unavailable worlds, command-source checks, or teleport failures. OMWH has no permission nodes, so base commands are available to all player sources and force can only be toggled globally, not permissioned separately.
 
-Normal `/spawn` may remain pending while OMWH prepares and checks the selected spawn area. Search preparation is hard-bounded to 64 chunks and advances by at most two chunks per pending request in a server tick. After choosing a safe spot, OMWH also prepares its exact 25-chunk destination area before the final check and movement. `/home` prepares at most 25 destination chunks before Minecraft resolves the saved respawn placement and before OMWH's normal safety check; force skips safety but still prepares terrain before movement. These bounds are fixed behavior and are not configuration fields.
+Normal `/home` and `/spawn` may remain pending while OMWH prepares terrain. Each pending request visit loads at most two chunks.
+
+For `/home`, OMWH first prepares the saved home block and only the additional chunks required by Minecraft 26.2's exact bed, bunk-bed, or respawn-anchor placement reads. Normal `/home` then adds only chunks crossed by the resolved player or vehicle safety footprint and its one-block collision-owner shell. The single above-bed fallback for an uncovered bed adds its footprint only when needed. `/home force` still prepares the exact terrain required for Minecraft's saved-respawn resolution, but skips OMWH's safety preparation and checks. `/home` does not preload a fixed 5-by-5 area or have a fixed 25-chunk preparation count.
+
+Normal non-End `/spawn` adds terrain as each candidate's exact safety footprint and one-block collision-owner shell need it. It retains no more than 64 unique search chunks. After accepting a safe spot, it prepares the exact 5-by-5 destination area, at most 25 chunks, before the final check and movement. These limits and preparation rules are fixed behavior, not configuration fields.
 
 ## Messages
 

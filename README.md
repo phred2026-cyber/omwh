@@ -10,9 +10,11 @@ OMWH can bring your vehicle, mount, friends, and other passengers along. It also
 
 ### `/home`
 
-`/home` returns you to your valid Minecraft respawn point. Missing, destroyed, blocked, or unsafe homes are refused instead of sending you somewhere else.
+`/home` returns you to your valid Minecraft respawn point. Missing or destroyed homes are refused instead of sending you somewhere else. Normal `/home` also refuses blocked or unsafe homes; players can deliberately use `/home force` when force commands are enabled.
 
 Cross-dimension homes are enabled by default. Server owners can disable them with `enableCrossDimensionTeleport`.
+
+OMWH loads only the nearby terrain Minecraft needs to find and check that home, instead of loading a fixed area around it. If that terrain is not ready yet, `/home` may stay pending across server ticks.
 
 ### `/spawn`
 
@@ -24,7 +26,7 @@ Nether destinations use Minecraft's normal coordinate scaling. End destinations 
 
 Use `/home` or `/spawn` while mounted and OMWH moves the root vehicle or mount with its full passenger group. This includes boats, minecarts, horses, other mounted entities, and player passengers.
 
-Passenger groups are limited to 64 entities. If the destination cannot fit the vehicle, OMWH refuses the teleport rather than separating riders or placing the group inside blocks.
+Passenger groups are limited to 64 entities. Without `force`, OMWH refuses a destination that cannot fit the vehicle rather than separating riders or placing the group inside blocks.
 
 ### Force commands
 
@@ -69,7 +71,7 @@ See [CONFIGURATION.md](CONFIGURATION.md) for all settings, defaults, messages, c
 - Cross-dimension `/home` is enabled by default.
 - Nether, End, and modded-dimension spawn destinations are disabled by default.
 - Cooldowns and pending searches clear when a player disconnects.
-- Normal `/spawn` may stay pending while OMWH prepares terrain and checks for a safe destination.
+- Normal `/home` and `/spawn` may stay pending while OMWH prepares terrain and checks the destination.
 
 ## Links
 
