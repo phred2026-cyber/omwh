@@ -23,6 +23,9 @@ public final class DestinationsTest {
         unmountedHomeRejectsHazardsUnlessForceWasRequested();
         homeSafetyUsesStandingDimensionsAndExactHazards();
         homePreparationIsARequiredTypeStateBeforeSafety();
+        homePreparationFollowsExactVanillaResolutionReadsThroughSharedPendingWork();
+        mountedHomePendingPreparesExactThenAcceptedAboveBedTerrainWithoutRestart();
+        vanillaResolutionMaximumCoversFractionalFloorsAndChargesInspectionInPlace();
         spawnRoutingHonorsThreePoliciesAndCrossingBoundary();
         forceUsesRawDestinationsWithoutChangingAdmission();
         mountedHomeClearanceUsesRootMarginsAndOnlyBedPolicyExemption();
@@ -52,7 +55,7 @@ public final class DestinationsTest {
         spawnFailureDistinguishesOversizedVehicle();
         collisionOwnersIncludeShellAndEveryInvolvedChunk();
         safetyOwnsFootprintsHazardsAndFiveByFiveChunkPreparation();
-        System.out.println("DestinationsTest PASS (33 behavior groups)");
+        System.out.println("DestinationsTest PASS (36 behavior groups)");
     }
 
     private static void homePolicyAllowsOnlyAcceptedRespawnsAndOneBedAlternate() {
@@ -108,7 +111,6 @@ public final class DestinationsTest {
 
     private static void homePreparationIsARequiredTypeStateBeforeSafety() {
         List<String> order = new ArrayList<>();
-        List<Long> requested = new ArrayList<>();
         BlockPos savedRespawn = new BlockPos(31, 70, -1);
         HomeDestination.SavedHome saved = new HomeDestination.SavedHome(
                 null, null, null, savedRespawn, false);
@@ -119,7 +121,7 @@ public final class DestinationsTest {
             }
             @Override public HomeDestination.PreparedSavedHome prepare(HomeDestination.SavedHome home) {
                 order.add("prepare");
-                return HomeDestination.prepare(home, requested::add);
+                return new HomeDestination.PreparedSavedHome(home);
             }
             @Override public HomeDestination.Resolution resolve(HomeDestination.PreparedSavedHome prepared) {
                 order.add("resolve");
@@ -135,12 +137,177 @@ public final class DestinationsTest {
         check(accepted.outcome() == HomeDestination.Outcome.ACCEPT,
                 "production home coordinator returns the evaluated result");
         check(order.equals(List.of("validate", "prepare", "resolve", "safety")),
-                "saved-home terrain is prepared before vanilla respawn resolution and safety");
-        check(requested.equals(DestinationSafety.destinationChunks(savedRespawn.getX() + 0.5,
-                        savedRespawn.getZ() + 0.5)),
-                "home preparation is centered on the known saved respawn block");
-        check(requested.size() == 25 && new HashSet<>(requested).size() == 25,
-                "home preparation makes exactly 25 deduplicated requests");
+                "prepared-home type state precedes vanilla respawn resolution and safety");
+    }
+
+    private static void homePreparationFollowsExactVanillaResolutionReadsThroughSharedPendingWork() {
+        var standing = EntityDimensions.fixed(0.6f, 1.8f);
+        var anchor = Blocks.RESPAWN_ANCHOR.defaultBlockState();
+        List<HomeDestination.TerrainRead> interiorReads = HomeDestination.vanillaResolutionTerrain(
+                new BlockPos(13, 70, 8), anchor, false, 0.0f, standing);
+        List<HomeDestination.TerrainRead> edgeReads = HomeDestination.vanillaResolutionTerrain(
+                new BlockPos(14, 70, 8), anchor, false, 0.0f, standing);
+        check(interiorReads.size() == HomeDestination.ANCHOR_DISMOUNT_CANDIDATES
+                        && edgeReads.size() == HomeDestination.ANCHOR_DISMOUNT_CANDIDATES,
+                "mapped 26.2 anchor resolution retains all 25 vanilla dismount candidates");
+
+        var northBed = Blocks.BED.red().defaultBlockState().setValue(
+                net.minecraft.world.level.block.BedBlock.FACING, net.minecraft.core.Direction.NORTH);
+        check(HomeDestination.vanillaResolutionTerrain(
+                        BlockPos.ZERO, northBed, false, 0.0f, standing).size()
+                        == HomeDestination.ORDINARY_BED_DISMOUNT_CANDIDATES,
+                "ordinary bed uses the exact ten surround and two above candidates");
+        check(HomeDestination.vanillaResolutionTerrain(
+                        BlockPos.ZERO, northBed, true, 0.0f, standing).size()
+                        == HomeDestination.BUNK_BED_DISMOUNT_CANDIDATES,
+                "bunk bed uses exact upper, lower, and above candidate groups");
+
+        List<Long> generated = new ArrayList<>();
+        DestinationSafety.ChunkPreparation preparation =
+                DestinationSafety.ChunkPreparation.expandableControlled(key -> {
+                    generated.add(key);
+                    return new Object();
+                });
+        List<HomeDestination.TerrainRead> allReads = new ArrayList<>(interiorReads);
+        allReads.addAll(edgeReads);
+        Commands.PendingWork<Void> route = HomeDestination.candidateTerrain(
+                preparation, allReads.iterator());
+        Commands.PendingSearches<String, Void> pending = new Commands.PendingSearches<>();
+        check(pending.add("home", route),
+                "home resolution terrain uses the shared Commands pending owner");
+        for (int candidate = 0; candidate < interiorReads.size(); candidate++) {
+            int before = generated.size();
+            pending.tick(1, 10, ignored -> { });
+            check(generated.size() - before <= SpawnDestination.PREPARATION_CHUNKS_PER_VISIT,
+                    "home resolution loads at most two chunks per request visit");
+        }
+        check(generated.equals(List.of(DestinationSafety.chunkKey(0, 0))) && pending.size() == 1,
+                "interior home does not generate a neighboring chunk before vanilla resolution");
+
+        while (pending.size() > 0) {
+            int before = generated.size();
+            pending.tick(1, 10, ignored -> { });
+            check(generated.size() - before <= SpawnDestination.PREPARATION_CHUNKS_PER_VISIT,
+                    "edge resolution remains inside the two-load request quantum");
+        }
+        check(generated.equals(List.of(
+                        DestinationSafety.chunkKey(0, 0), DestinationSafety.chunkKey(1, 0))),
+                "exact one-block collision-owner shell crossing x=16 generates the adjacent chunk");
+    }
+
+    private static void mountedHomePendingPreparesExactThenAcceptedAboveBedTerrainWithoutRestart() {
+        List<String> order = new ArrayList<>();
+        List<Long> generated = new ArrayList<>();
+        BlockPos homeBlock = new BlockPos(8, 70, 8);
+        HomeDestination.SavedHome home = new HomeDestination.SavedHome(null, null, null, homeBlock, false);
+        DestinationSafety.ChunkPreparation preparation =
+                DestinationSafety.ChunkPreparation.expandableControlled(key -> {
+                    generated.add(key);
+                    return new Object();
+                });
+        HomeDestination.HomeAccess access = new HomeDestination.HomeAccess() {
+            @Override public HomeDestination.Validation validate() { throw new AssertionError("already validated"); }
+            @Override public HomeDestination.PreparedSavedHome prepare(HomeDestination.SavedHome saved) {
+                order.add("prepare");
+                return new HomeDestination.PreparedSavedHome(saved);
+            }
+            @Override public HomeDestination.Resolution resolve(HomeDestination.PreparedSavedHome prepared) {
+                order.add("resolve");
+                return new HomeDestination.Resolution(HomeDestination.Outcome.ACCEPT,
+                        new HomeDestination.ResolvedHome(prepared, null, null));
+            }
+            @Override public HomeDestination.TerrainRead initialSafetyTerrain(
+                    HomeDestination.ResolvedHome resolved, boolean force) {
+                order.add("exact-terrain");
+                return new HomeDestination.TerrainRead(16, 16, 8, 8);
+            }
+            @Override public HomeDestination.SafetyEvaluation evaluateInitial(
+                    HomeDestination.ResolvedHome resolved, boolean force) {
+                order.add("exact-safety");
+                return new HomeDestination.SafetyEvaluation(null,
+                        new HomeDestination.TerrainRead(32, 32, 8, 8));
+            }
+            @Override public HomeDestination.Result evaluateFallback(HomeDestination.ResolvedHome resolved) {
+                order.add("above-bed-safety");
+                return new HomeDestination.Result(HomeDestination.Outcome.ACCEPT, null);
+            }
+            @Override public HomeDestination.Result evaluate(HomeDestination.ResolvedHome resolved, boolean force) {
+                throw new AssertionError("pending path must use the staged safety contract");
+            }
+        };
+        HomeDestination.Pending pending = HomeDestination.Pending.controlled(
+                false, access, home, preparation, List.<HomeDestination.TerrainRead>of().iterator());
+
+        int candidateStarts = 0;
+        int visits = 0;
+        while (true) {
+            int before = generated.size();
+            Commands.PendingStep<HomeDestination.Result> used = pending.step(1, 200_000);
+            candidateStarts += used.candidatesUsed();
+            check(generated.size() - before <= SpawnDestination.PREPARATION_CHUNKS_PER_VISIT,
+                    "exact and above-bed home terrain obey the two-load request quantum");
+            if (used.complete()) {
+                check(used.value().outcome() == HomeDestination.Outcome.ACCEPT,
+                        "mounted above-bed fallback completes through the pending home route");
+                break;
+            }
+            check(++visits < 20, "mounted staged home route resumes without restart");
+        }
+        check(generated.equals(List.of(
+                        DestinationSafety.chunkKey(1, 0), DestinationSafety.chunkKey(2, 0))),
+                "mounted route loads only exact and accepted above-bed safety chunks");
+        check(order.equals(List.of("prepare", "resolve", "exact-terrain",
+                        "exact-safety", "above-bed-safety")),
+                "vanilla resolution, exact mounted safety, and above-bed fallback remain ordered");
+        check(candidateStarts == 2, "exact and above-bed terrain each start once without restart");
+        pending.close();
+    }
+
+    private static void vanillaResolutionMaximumCoversFractionalFloorsAndChargesInspectionInPlace() {
+        EntityDimensions standing = EntityDimensions.fixed(0.6f, 1.8f);
+        DestinationSafety.CellRange halfSlabOwners = DestinationSafety.collisionOwnerCells(
+                DestinationSafety.standingPlayerBounds(new Vec3(0.5, 64.5, 0.5), standing));
+        check(halfSlabOwners.equals(new DestinationSafety.CellRange(-1, 1, 63, 67, -1, 1)),
+                "fractional half-slab floor expands the vanilla player owner shell to 3x5x3");
+        check(HomeDestination.VANILLA_DISMOUNT_DIRECT_BLOCK_READS == 6
+                        && HomeDestination.VANILLA_PLAYER_COLLISION_OWNER_CELLS == 3 * 5 * 3
+                        && HomeDestination.MAX_VANILLA_DISMOUNT_PASSES == 50
+                        && HomeDestination.MAX_VANILLA_RESOLUTION_WORK == 2 + 50 * (6 + 45 * 9),
+                "vanilla resolution maximum exactly covers inspection, six direct reads, and 45 owner cells");
+
+        AtomicInteger inspections = new AtomicInteger();
+        HomeDestination.SavedHome home = new HomeDestination.SavedHome(
+                null, null, null, BlockPos.ZERO, false);
+        HomeDestination.HomeAccess access = new HomeDestination.HomeAccess() {
+            @Override public HomeDestination.Validation validate() { throw new AssertionError("already validated"); }
+            @Override public HomeDestination.PreparedSavedHome prepare(HomeDestination.SavedHome saved) {
+                return new HomeDestination.PreparedSavedHome(saved);
+            }
+            @Override public List<HomeDestination.TerrainRead> resolutionTerrain(HomeDestination.SavedHome saved) {
+                inspections.incrementAndGet();
+                return List.of();
+            }
+            @Override public HomeDestination.Resolution resolve(HomeDestination.PreparedSavedHome prepared) {
+                throw new AssertionError("resolution must wait for its separately reserved maximum");
+            }
+            @Override public HomeDestination.Result evaluate(HomeDestination.ResolvedHome resolved, boolean force) {
+                throw new AssertionError("resolution has not run");
+            }
+        };
+        DestinationSafety.ChunkPreparation preparation =
+                DestinationSafety.ChunkPreparation.expandableControlled(key -> new Object());
+        HomeDestination.Pending pending = new HomeDestination.Pending(false, access, home, preparation);
+
+        Commands.PendingStep<HomeDestination.Result> prepared = pending.step(1, 1);
+        check(!prepared.complete() && prepared.worldWorkUsed() == 1 && inspections.get() == 0,
+                "home-state and bunk inspection never runs after exhausting the current visit allowance");
+        Commands.PendingStep<HomeDestination.Result> blocked = pending.step(1, 1);
+        check(!blocked.complete() && blocked.worldWorkUsed() == 0 && inspections.get() == 0,
+                "inspection waits when its exact two-read reservation is unavailable");
+        Commands.PendingStep<HomeDestination.Result> inspected = pending.step(1, 2);
+        check(!inspected.complete() && inspected.worldWorkUsed() == 2 && inspections.get() == 1,
+                "home-state and bunk inspection is charged in the same step in which both reads may occur");
+        pending.close();
     }
 
     private static void spawnRoutingHonorsThreePoliciesAndCrossingBoundary() {
@@ -327,10 +494,20 @@ public final class DestinationsTest {
                 "End bound independently includes support collision-shape checks and player diagnostics");
         check(DestinationSafety.MAX_SPAWN_CANDIDATE_WORK == 46_372,
                 "spawn candidate bound independently includes support collision-shape checks");
+        check(HomeDestination.MAX_VANILLA_RESOLUTION_WORK == 20_552
+                        && HomeDestination.INITIAL_HOME_SAFETY_WORK == 59_035
+                        && HomeDestination.FALLBACK_HOME_SAFETY_WORK == 59_015
+                        && HomeDestination.RESOLUTION_AND_SAFETY_WORK == 138_602,
+                "home accounting derives from mapped candidate passes, direct reads, owner cells, and safety phases");
         check(Commands.MAX_IMMEDIATE_ROUTE_WORK == 120_096
                         && Commands.MAX_PENDING_TICKET_RELEASE_WORK == 89
-                        && Commands.SEARCH_WORLD_WORK_PER_TICK == 120_760,
-                "cleanup, immediate, and aggregate reservations match independently calculated maxima");
+                        && Commands.SEARCH_WORLD_WORK_PER_TICK
+                        == TeleportService.LIFECYCLE_CAPTURE_WORK
+                        + Commands.MAX_PENDING_TICKET_RELEASE_WORK
+                        + Math.max(Commands.MAX_IMMEDIATE_ROUTE_WORK,
+                        HomeDestination.RESOLUTION_AND_SAFETY_WORK + Commands.MAX_EFFECT_DISPATCHES
+                                + TeleportService.COMPLETION_WORK + TeleportService.LIFECYCLE_VALIDATION_WORK),
+                "cleanup, immediate, lazy-home, and aggregate reservations are composed from named work");
         check(DestinationSafety.destinationChunks(0, 0).size()
                         == DestinationSafety.DESTINATION_CHUNK_CAP,
                 "immediate preparation is explicitly capped at 25 chunks");
@@ -870,11 +1047,8 @@ public final class DestinationsTest {
         check(SpawnDestination.CandidateProbe.class.isAssignableFrom(DestinationSafety.SpawnProbe.class),
                 "production DestinationSafety probe is wired into the incremental search contract");
         check(Commands.SEARCH_CANDIDATES_PER_TICK == 4_096
-                        && Commands.SEARCH_WORLD_WORK_PER_TICK
-                        == TeleportService.LIFECYCLE_CAPTURE_WORK
-                        + Commands.MAX_PENDING_TICKET_RELEASE_WORK
-                        + Commands.MAX_IMMEDIATE_ROUTE_WORK,
-                "candidate starts stay fixed while world work includes cleanup and the maximum route");
+                        && Commands.SEARCH_WORLD_WORK_PER_TICK == 142_062,
+                "candidate starts stay fixed while aggregate world work covers staged lazy home and immediate routes");
         AtomicInteger directRangeChecks = new AtomicInteger();
         SpawnDestination.CandidateProbe probe = new SpawnDestination.CandidateProbe() {
             @Override public void begin(SpawnDestination.Offset offset, SpawnDestination.ProbeKind kind) {

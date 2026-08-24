@@ -347,6 +347,26 @@ public final class DestinationSafety {
                     floor(Math.nextDown(feetZ + centerOffset + half)) + 1);
         }
 
+        void requireTerrainRead(HomeDestination.TerrainRead read) {
+            requireBlockRange(read.minX(), read.maxX(), read.minZ(), read.maxZ());
+        }
+
+        boolean terrainReadReady(HomeDestination.TerrainRead read) {
+            return liveResidency().coversBlockRange(
+                    read.minX(), read.maxX(), read.minZ(), read.maxZ());
+        }
+
+        void requireCollisionOwnerShell(Bounds bounds) {
+            CellRange owners = collisionOwnerCells(bounds);
+            requireBlockRange(owners.minX(), owners.maxX(), owners.minZ(), owners.maxZ());
+        }
+
+        boolean collisionOwnerShellReady(Bounds bounds) {
+            CellRange owners = collisionOwnerCells(bounds);
+            return liveResidency().coversBlockRange(
+                    owners.minX(), owners.maxX(), owners.minZ(), owners.maxZ());
+        }
+
         private void requireBlockRange(int minBlockX, int maxBlockX, int minBlockZ, int maxBlockZ) {
             if (closing) throw new IllegalStateException("terrain preparation is closing");
             for (int x = chunkCoordinate(minBlockX); x <= chunkCoordinate(maxBlockX); x++) {
@@ -882,6 +902,10 @@ public final class DestinationSafety {
         BlockPos other = homeBlock.relative(BedBlock.getConnectedDirection(homeState));
         return new ConfiguredBed(homeBlock,
                 level.getBlockState(other).getBlock() instanceof BedBlock ? other : null);
+    }
+
+    static Bounds boundsAt(Entity entity, Vec3 position) {
+        return bounds(entity.getBoundingBox().move(position.subtract(entity.position())));
     }
 
     private static Bounds bounds(AABB box) {

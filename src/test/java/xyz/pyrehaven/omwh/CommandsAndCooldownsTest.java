@@ -15,6 +15,7 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 
 public final class CommandsAndCooldownsTest {
     public static void main(String[] args) {
@@ -29,6 +30,8 @@ public final class CommandsAndCooldownsTest {
         pendingCleanupIsAccountedAndRetried();
         productionCancellationCallersOwnCleanupAccounting();
         productionSpawnRouteDelegatesTicketOwnership();
+        productionHomeRouteReleasesTerrainAcrossEveryCommandsTerminalExit();
+        pendingHomeRespawnAuthorityChangesCancelBeforeResolutionAndReleaseExactly();
         pendingGenerationFailureRetiresAndReleasesExactlyOnce();
         pendingSpawnSchedulingSharesOneFairServerWideBudget();
         preparationProgressYieldsAfterOneQuantumPerSchedulerTick();
@@ -39,7 +42,7 @@ public final class CommandsAndCooldownsTest {
         admissionAndLifecycleWorkShareHardAggregateAllowances();
         zeroProgressKeepsTheBlockedRequestNext();
         pendingCommandAdmissionCancelsOnlyCompetingTeleports();
-        System.out.println("CommandsAndCooldownsTest PASS (19 behavior groups)");
+        System.out.println("CommandsAndCooldownsTest PASS (23 behavior groups)");
     }
 
     private static void forceSyntaxFollowsTheServerSetting() {
@@ -514,7 +517,7 @@ public final class CommandsAndCooldownsTest {
         Commands commands = new Commands(config, new Cooldowns(config, () -> 1_000L));
         List<SpawnDestination.Result> completions = new ArrayList<>();
         UUID player = UUID.randomUUID();
-        check(commands.enqueuePending(player, commands.createSpawnCoordinator(
+        check(commands.enqueuePending(player, commands.createPendingCoordinator(
                         route,
                         () -> TeleportService.LifecycleStatus.CURRENT,
                         value -> true,
@@ -534,6 +537,228 @@ public final class CommandsAndCooldownsTest {
                         && completions.size() == 1
                         && completions.getFirst().outcome() == SpawnDestination.Outcome.UNSAFE,
                 "terminal production routing releases owned terrain exactly once after completion");
+    }
+
+    private static void productionHomeRouteReleasesTerrainAcrossEveryCommandsTerminalExit() {
+        class HomeRoute {
+            final AtomicInteger releases = new AtomicInteger();
+            final AtomicInteger releaseAttempts = new AtomicInteger();
+            final Set<Long> retained = new HashSet<>();
+            final Commands.PendingWork<HomeDestination.Result> work;
+
+            HomeRoute(HomeDestination.Outcome resolutionOutcome, int candidateChunks, boolean failFirstRelease) {
+                this(resolutionOutcome, candidateChunks, failFirstRelease, false);
+            }
+
+            HomeRoute(HomeDestination.Outcome resolutionOutcome, int candidateChunks,
+                      boolean failFirstRelease, boolean force) {
+                DestinationSafety.ChunkPreparation preparation =
+                        DestinationSafety.ChunkPreparation.expandableControlled(new DestinationSafety.TicketAccess() {
+                            @Override public void retain(long chunk) { retained.add(chunk); }
+                            @Override public Object load(long chunk) { return new Object(); }
+                            @Override public void release(long chunk) {
+                                int attempt = releaseAttempts.incrementAndGet();
+                                if (failFirstRelease && attempt == 1) throw new IllegalStateException("release once");
+                                check(retained.remove(chunk), "concrete home release owns the exact ticket");
+                                releases.incrementAndGet();
+                            }
+                        });
+                HomeDestination.SavedHome home = new HomeDestination.SavedHome(
+                        null, null, null, BlockPos.ZERO, false);
+                HomeDestination.HomeAccess access = new HomeDestination.HomeAccess() {
+                    @Override public HomeDestination.Validation validate() { throw new AssertionError("already validated"); }
+                    @Override public HomeDestination.PreparedSavedHome prepare(HomeDestination.SavedHome saved) {
+                        return new HomeDestination.PreparedSavedHome(saved);
+                    }
+                    @Override public HomeDestination.Resolution resolve(HomeDestination.PreparedSavedHome prepared) {
+                        return resolutionOutcome == HomeDestination.Outcome.ACCEPT
+                                ? new HomeDestination.Resolution(HomeDestination.Outcome.ACCEPT,
+                                new HomeDestination.ResolvedHome(prepared, null, null))
+                                : new HomeDestination.Resolution(resolutionOutcome, null);
+                    }
+                    @Override public HomeDestination.Result evaluate(
+                            HomeDestination.ResolvedHome resolved, boolean requestedForce) {
+                        check(requestedForce == force, "concrete home route preserves force through preparation");
+                        return new HomeDestination.Result(HomeDestination.Outcome.ACCEPT, null);
+                    }
+                };
+                List<HomeDestination.TerrainRead> reads = new ArrayList<>();
+                for (int chunk = 0; chunk < candidateChunks; chunk++) {
+                    reads.add(new HomeDestination.TerrainRead(chunk * 16, chunk * 16, 0, 0));
+                }
+                HomeDestination.Pending pending = HomeDestination.Pending.controlled(
+                        force, access, home, preparation, reads.iterator());
+                work = Commands.pendingHomeRoute(pending);
+            }
+        }
+
+        java.util.function.Supplier<Commands> commands = () -> {
+            OmwhConfig config = new OmwhConfig();
+            return new Commands(config, new Cooldowns(config, () -> 1_000L));
+        };
+
+        Commands acceptedCommands = commands.get();
+        HomeRoute accepted = new HomeRoute(HomeDestination.Outcome.ACCEPT, 1, false);
+        AtomicInteger acceptedCompletions = new AtomicInteger();
+        UUID acceptedPlayer = UUID.randomUUID();
+        check(acceptedCommands.enqueuePending(acceptedPlayer, acceptedCommands.createPendingCoordinator(
+                        accepted.work, () -> TeleportService.LifecycleStatus.CURRENT,
+                        value -> true, value -> true,
+                        value -> {
+                            check(accepted.releases.get() == 0,
+                                    "accepted /home completion runs while terrain remains retained");
+                            acceptedCompletions.incrementAndGet();
+                        }, status -> { throw new AssertionError("current lifecycle"); })),
+                "accepted concrete home route enqueued");
+        acceptedCommands.tick();
+        check(acceptedCompletions.get() == 1 && accepted.releases.get() == 1 && accepted.retained.isEmpty(),
+                "accepted /home releases its exact terrain once after completion");
+
+        Commands forcedCommands = commands.get();
+        HomeRoute forced = new HomeRoute(HomeDestination.Outcome.ACCEPT, 1, false, true);
+        AtomicInteger forcedCompletions = new AtomicInteger();
+        check(forcedCommands.enqueuePending(UUID.randomUUID(), forcedCommands.createPendingCoordinator(
+                        forced.work, () -> TeleportService.LifecycleStatus.CURRENT,
+                        value -> true, value -> true,
+                        value -> forcedCompletions.incrementAndGet(),
+                        status -> { throw new AssertionError("current lifecycle"); })),
+                "forced concrete home route enqueued through the shared pending owner");
+        forcedCommands.tick();
+        check(forcedCompletions.get() == 1 && forced.releases.get() == 1 && forced.retained.isEmpty(),
+                "forced /home still prepares and releases its exact vanilla-resolution terrain");
+
+        Commands deniedCommands = commands.get();
+        HomeRoute denied = new HomeRoute(HomeDestination.Outcome.NO_HOME, 1, false);
+        AtomicInteger deniedCompletions = new AtomicInteger();
+        check(deniedCommands.enqueuePending(UUID.randomUUID(), deniedCommands.createPendingCoordinator(
+                        denied.work, () -> TeleportService.LifecycleStatus.CURRENT,
+                        value -> true, value -> true,
+                        value -> {
+                            check(value.outcome() == HomeDestination.Outcome.NO_HOME,
+                                    "invalid vanilla resolution reaches concrete home completion");
+                            deniedCompletions.incrementAndGet();
+                        }, status -> { throw new AssertionError("current lifecycle"); })),
+                "denied concrete home route enqueued");
+        deniedCommands.tick();
+        check(deniedCompletions.get() == 1 && denied.releases.get() == 1 && denied.retained.isEmpty(),
+                "denied/invalid /home releases retained terrain exactly once");
+
+        java.util.function.BiConsumer<Commands, UUID> homeCancel = Commands::cancelPendingForHome;
+        java.util.function.BiConsumer<Commands, UUID> forceCancel = Commands::cancelPendingForForcedSpawn;
+        java.util.function.BiConsumer<Commands, UUID> disconnect = Commands::removePending;
+        java.util.function.BiConsumer<Commands, UUID> respawn = Commands::respawnPending;
+        for (var cancellation : List.of(homeCancel, forceCancel, disconnect, respawn)) {
+            Commands owner = commands.get();
+            HomeRoute pendingHome = new HomeRoute(HomeDestination.Outcome.ACCEPT, 3, false);
+            UUID player = UUID.randomUUID();
+            check(owner.enqueuePending(player, owner.createPendingCoordinator(
+                            pendingHome.work, () -> TeleportService.LifecycleStatus.CURRENT,
+                            value -> true, value -> true,
+                            value -> { throw new AssertionError("cancelled home route cannot complete"); },
+                            status -> { throw new AssertionError("current lifecycle"); })),
+                    "concrete pending home cancellation enqueued");
+            owner.tick();
+            check(pendingHome.retained.size() == 1,
+                    "one concrete home chunk is retained before lifecycle cancellation");
+            cancellation.accept(owner, player);
+            check(pendingHome.releases.get() == 1 && pendingHome.retained.isEmpty(),
+                    "/home, forced /spawn, disconnect, and respawn each release concrete home terrain once");
+        }
+
+        Commands stopped = commands.get();
+        HomeRoute stopping = new HomeRoute(HomeDestination.Outcome.ACCEPT, 3, true);
+        UUID stoppingPlayer = UUID.randomUUID();
+        check(stopped.enqueuePending(stoppingPlayer, stopped.createPendingCoordinator(
+                        stopping.work, () -> TeleportService.LifecycleStatus.CURRENT,
+                        value -> true, value -> true,
+                        value -> { throw new AssertionError("stopped home route cannot complete"); },
+                        status -> { throw new AssertionError("current lifecycle"); })),
+                "SERVER_STOPPED home route enqueued");
+        stopped.tick();
+        stopped.clearPending();
+        check(stopping.releaseAttempts.get() == 2 && stopping.releases.get() == 1
+                        && stopping.retained.isEmpty(),
+                "SERVER_STOPPED retries a failed concrete /home release and leaves no ticket");
+    }
+
+    private static void pendingHomeRespawnAuthorityChangesCancelBeforeResolutionAndReleaseExactly() {
+        Object oldLevel = new Object();
+        Object movedLevel = new Object();
+        HomeDestination.RespawnAuthority expected = new HomeDestination.RespawnAuthority(
+                oldLevel, "overworld", new BlockPos(8, 70, 8), 35.0f, -12.0f, false);
+        List<HomeDestination.RespawnAuthority> staleAuthorities = java.util.Arrays.asList(
+                null,
+                new HomeDestination.RespawnAuthority(
+                        oldLevel, "overworld", new BlockPos(40, 80, -4), 35.0f, -12.0f, false),
+                new HomeDestination.RespawnAuthority(
+                        movedLevel, "nether", new BlockPos(8, 70, 8), 35.0f, -12.0f, false));
+
+        for (HomeDestination.RespawnAuthority stale : staleAuthorities) {
+            AtomicReference<HomeDestination.RespawnAuthority> current = new AtomicReference<>(expected);
+            AtomicInteger resolutions = new AtomicInteger();
+            AtomicInteger completions = new AtomicInteger();
+            AtomicInteger feedback = new AtomicInteger();
+            AtomicInteger releases = new AtomicInteger();
+            Set<Long> retained = new HashSet<>();
+            DestinationSafety.ChunkPreparation preparation =
+                    DestinationSafety.ChunkPreparation.expandableControlled(new DestinationSafety.TicketAccess() {
+                        @Override public void retain(long chunk) { retained.add(chunk); }
+                        @Override public Object load(long chunk) { return new Object(); }
+                        @Override public void release(long chunk) {
+                            check(retained.remove(chunk), "stale home releases the exact retained ticket");
+                            releases.incrementAndGet();
+                        }
+                    });
+            HomeDestination.SavedHome home = new HomeDestination.SavedHome(
+                    null, null, null, expected.pos(), expected.forced(), expected);
+            HomeDestination.HomeAccess access = new HomeDestination.HomeAccess() {
+                @Override public HomeDestination.Validation validate() { throw new AssertionError("already validated"); }
+                @Override public HomeDestination.RespawnAuthority currentAuthority(
+                        HomeDestination.SavedHome saved) {
+                    return current.get();
+                }
+                @Override public HomeDestination.PreparedSavedHome prepare(HomeDestination.SavedHome saved) {
+                    return new HomeDestination.PreparedSavedHome(saved);
+                }
+                @Override public HomeDestination.Resolution resolve(HomeDestination.PreparedSavedHome prepared) {
+                    resolutions.incrementAndGet();
+                    return new HomeDestination.Resolution(HomeDestination.Outcome.ACCEPT,
+                            new HomeDestination.ResolvedHome(prepared, null, null));
+                }
+                @Override public HomeDestination.Result evaluate(
+                        HomeDestination.ResolvedHome resolved, boolean force) {
+                    throw new AssertionError("stale home cannot reach safety");
+                }
+            };
+            HomeDestination.Pending pending = HomeDestination.Pending.controlled(false, access, home, preparation,
+                    List.of(new HomeDestination.TerrainRead(0, 0, 0, 0),
+                            new HomeDestination.TerrainRead(16, 16, 0, 0)).iterator());
+            OmwhConfig config = new OmwhConfig();
+            Commands commands = new Commands(config, new Cooldowns(config, () -> 1_000L));
+            UUID player = UUID.randomUUID();
+            check(commands.enqueuePending(player, commands.createPendingCoordinator(
+                            Commands.pendingHomeRoute(pending),
+                            () -> TeleportService.LifecycleStatus.CURRENT,
+                            value -> true,
+                            value -> {
+                                boolean authoritative = pending.authorityCurrent();
+                                if (!authoritative) feedback.incrementAndGet();
+                                return authoritative;
+                            },
+                            value -> completions.incrementAndGet(),
+                            status -> { throw new AssertionError("entity lifecycle remains current"); })),
+                    "stale-authority home route enqueued");
+
+            commands.tick();
+            check(retained.size() == 1 && releases.get() == 0,
+                    "first route visit retains one exact home-resolution chunk");
+            current.set(stale);
+            commands.tick();
+            check(resolutions.get() == 0 && completions.get() == 0,
+                    "cleared, moved, and cross-dimension respawn changes prevent resolution and completion");
+            check(feedback.get() == 1 && releases.get() == 1 && retained.isEmpty(),
+                    "stale respawn cancellation gives one no-home retry signal and releases exactly once");
+        }
     }
 
     private static void pendingGenerationFailureRetiresAndReleasesExactlyOnce() {
@@ -738,7 +963,7 @@ public final class CommandsAndCooldownsTest {
         BlockPos acceptedAnchor = new BlockPos(4, 70, -2);
         List<String> events = new ArrayList<>();
 
-        Commands.PendingWork<Void> accepted = commands.createSpawnCoordinator(
+        Commands.PendingWork<Void> accepted = commands.createPendingCoordinator(
                 (candidateBudget, worldBudget) -> Commands.PendingStep.complete("accepted", 1, 1),
                 () -> TeleportService.LifecycleStatus.CURRENT,
                 value -> Commands.finalCooldownAdmission(cooldowns, player, config, events::add),
@@ -752,7 +977,7 @@ public final class CommandsAndCooldownsTest {
 
         cooldowns.recordRegular(player);
         events.clear();
-        check(commands.enqueuePending(player, commands.createSpawnCoordinator(
+        check(commands.enqueuePending(player, commands.createPendingCoordinator(
                 (candidateBudget, worldBudget) -> Commands.PendingStep.complete("blocked", 1, 1),
                 () -> TeleportService.LifecycleStatus.CURRENT,
                 value -> Commands.finalCooldownAdmission(cooldowns, player, config, events::add),
@@ -763,7 +988,7 @@ public final class CommandsAndCooldownsTest {
                 "final cooldown denial sends feedback and suppresses completion");
 
         events.clear();
-        check(commands.enqueuePending(player, commands.createSpawnCoordinator(
+        check(commands.enqueuePending(player, commands.createPendingCoordinator(
                 (candidateBudget, worldBudget) -> Commands.PendingStep.pending(1, 1),
                 () -> TeleportService.LifecycleStatus.TOO_LARGE,
                 value -> true, value -> true, value -> events.add("complete"),
@@ -782,7 +1007,7 @@ public final class CommandsAndCooldownsTest {
             @Override public void close() { ticketReleases.incrementAndGet(); }
         };
         UUID stalePlayer = UUID.randomUUID();
-        check(commands.enqueuePending(stalePlayer, commands.createSpawnCoordinator(
+        check(commands.enqueuePending(stalePlayer, commands.createPendingCoordinator(
                         retainedRoute,
                         () -> TeleportService.LifecycleStatus.STALE,
                         value -> true, value -> true, value -> events.add("complete"),

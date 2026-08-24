@@ -39,10 +39,13 @@ public final class Commands {
             + TeleportService.COMPLETION_WORK;
     static final int SEARCH_WORLD_WORK_PER_TICK = TeleportService.LIFECYCLE_CAPTURE_WORK
             + MAX_PENDING_TICKET_RELEASE_WORK
-            + MAX_IMMEDIATE_ROUTE_WORK;
+            + Math.max(MAX_IMMEDIATE_ROUTE_WORK,
+            HomeDestination.RESOLUTION_AND_SAFETY_WORK + MAX_EFFECT_DISPATCHES
+                    + TeleportService.COMPLETION_WORK + TeleportService.LIFECYCLE_VALIDATION_WORK);
     static final int PENDING_ROUTE_MINIMUM_PROGRESS_WORK = DestinationSafety.SpawnProbe.MAX_CELL_WORK;
-    static final int PENDING_ROUTE_WORK_SLICE = SEARCH_CANDIDATES_PER_TICK
-            * PENDING_ROUTE_MINIMUM_PROGRESS_WORK;
+    static final int PENDING_ROUTE_WORK_SLICE = Math.max(
+            SEARCH_CANDIDATES_PER_TICK * PENDING_ROUTE_MINIMUM_PROGRESS_WORK,
+            HomeDestination.RESOLUTION_AND_SAFETY_WORK + SpawnDestination.PREPARATION_CHUNKS_PER_VISIT);
     static final int PENDING_COMPLETION_WORK = MAX_EFFECT_DISPATCHES
             + TeleportService.COMPLETION_WORK;
     static final int PENDING_ADVANCEMENT_WORK_PER_TICK = TeleportService.LIFECYCLE_VALIDATION_WORK
@@ -52,7 +55,7 @@ public final class Commands {
     static final int MAX_PENDING_VISIT_WORK = PENDING_ADVANCEMENT_WORK_PER_TICK;
     private final OmwhConfig config;
     private final Cooldowns cooldowns;
-    private final PendingSearches<UUID, Void> pendingSpawns = new PendingSearches<>();
+    private final PendingSearches<UUID, Void> pendingTeleports = new PendingSearches<>();
     private final TickWorkAllowance serverWork;
     private long pendingTickEpoch;
 
@@ -195,7 +198,7 @@ public final class Commands {
                 closeOrRetain(cleanup.removeFirst());
             }
             if (!cleanup.isEmpty()) {
-                throw new IllegalStateException("OMWH could not release all pending /spawn terrain at shutdown");
+                throw new IllegalStateException("OMWH could not release all pending teleport terrain at shutdown");
             }
         }
         int size() { return searches.size(); }
@@ -289,7 +292,7 @@ public final class Commands {
                 work.close();
             } catch (RuntimeException failure) {
                 cleanup.addLast(work);
-                LOGGER.error("OMWH could not release pending /spawn terrain; cleanup will retry", failure);
+                LOGGER.error("OMWH could not release pending teleport terrain; cleanup will retry", failure);
             }
             return worldWork;
         }
@@ -305,7 +308,7 @@ public final class Commands {
         this.serverWork = new TickWorkAllowance(serverWorkLimit);
     }
 
-    <V> PendingWork<Void> createSpawnCoordinator(
+    <V> PendingWork<Void> createPendingCoordinator(
             PendingWork<V> route,
             Supplier<TeleportService.LifecycleStatus> lifecycle,
             Predicate<V> finalAdmission,
@@ -348,7 +351,7 @@ public final class Commands {
     }
 
     boolean enqueuePending(UUID playerId, PendingWork<Void> pending) {
-        return pendingSpawns.add(playerId, pending);
+        return pendingTeleports.add(playerId, pending);
     }
 
     void register(CommandDispatcher<CommandSourceStack> dispatcher) {
@@ -418,22 +421,42 @@ public final class Commands {
         cancelPendingForHome(player.getUUID());
         try {
             if (!admit(player)) return 0;
-            if (!serverWork.claim(TeleportService.LIFECYCLE_CAPTURE_WORK + MAX_IMMEDIATE_ROUTE_WORK)) {
+            if (!serverWork.claim(SpawnDestination.PENDING_START_WORK)) {
                 send(player, commandMessage(config.busyMessage, config.homeCommand));
                 return 0;
             }
-            TeleportService.captureLifecycle(player);
-            HomeDestination.Result destination = HomeDestination.find(
+            HomeDestination.Plan plan = HomeDestination.plan(
                     player, force, config.enableCrossDimensionTeleport);
-            switch (destination.outcome()) {
-                case NO_HOME -> send(player, commandMessage(config.noHomepointMessage, config.homeCommand));
-                case CROSS_DIMENSION -> send(player, commandMessage(config.crossDimensionMessage, config.homeCommand));
-                case VEHICLE_TOO_LARGE -> send(player,
-                        commandMessageWithForceGuidance(config.vehicleTooLargeMessage, config.homeCommand));
-                case UNSAFE -> send(player,
-                        commandMessageWithForceGuidance(config.unsafeHomeMessage, config.homeCommand));
-                case ACCEPT -> { return teleport(player, destination.destination(), true, true); }
+            if (plan.immediate() != null) return completeHome(player, plan.immediate());
+            if (!serverWork.claim(TeleportService.LIFECYCLE_CAPTURE_WORK)) {
+                plan.pending().close();
+                send(player, commandMessage(config.busyMessage, config.homeCommand));
+                return 0;
             }
+            TeleportService.LifecycleFence<Entity> lifecycle = TeleportService.captureLifecycle(player);
+            PendingWork<Void> coordinated = createPendingCoordinator(
+                    pendingHomeRoute(plan.pending()),
+                    () -> TeleportService.lifecycleStatus(lifecycle),
+                    result -> result.outcome() != HomeDestination.Outcome.ACCEPT || admit(player),
+                    result -> {
+                        boolean current = plan.pending().authorityCurrent();
+                        if (!current) sendSafely(player,
+                                commandMessage(config.noHomepointMessage, config.homeCommand));
+                        return current;
+                    },
+                    result -> completeHome(player, result),
+                    status -> {
+                        if (status == TeleportService.LifecycleStatus.TOO_LARGE) {
+                            sendSafely(player,
+                                    commandMessage(config.passengerTreeTooLargeMessage, config.homeCommand));
+                        }
+                    });
+            PendingWork<Void> guarded = guardPending(coordinated, failure -> {
+                LOGGER.error("Unexpected pending /home failure for {}", player.getGameProfile().name(), failure);
+                sendSafely(player, commandMessage(config.internalErrorMessage, config.homeCommand));
+            });
+            pendingTeleports.add(player.getUUID(), guarded);
+            return 1;
         } catch (TeleportService.PassengerTreeTooLarge tooLarge) {
             sendSafely(player, commandMessage(config.passengerTreeTooLargeMessage, config.homeCommand));
         } catch (RuntimeException failure) {
@@ -445,7 +468,7 @@ public final class Commands {
 
     private int executeSpawn(ServerPlayer player, boolean force) {
         if (player == null) return 0;
-        PendingSpawnAction pendingAction = pendingSpawnAction(pendingSpawns.contains(player.getUUID()), force);
+        PendingSpawnAction pendingAction = pendingSpawnAction(pendingTeleports.contains(player.getUUID()), force);
         if (pendingAction == PendingSpawnAction.REFUSE) {
             send(player, commandMessage(config.spawnPendingMessage, config.spawnCommand));
             return 0;
@@ -488,7 +511,7 @@ public final class Commands {
                 return 0;
             }
             TeleportService.LifecycleFence<Entity> lifecycle = TeleportService.captureLifecycle(player);
-            PendingWork<Void> coordinated = createSpawnCoordinator(
+            PendingWork<Void> coordinated = createPendingCoordinator(
                     pendingSpawnRoute(search),
                     () -> TeleportService.lifecycleStatus(lifecycle),
                     result -> result.outcome() != SpawnDestination.Outcome.ACCEPT || admit(player),
@@ -511,7 +534,7 @@ public final class Commands {
                 LOGGER.error("Unexpected pending /spawn failure for {}", player.getGameProfile().name(), failure);
                 sendSafely(player, commandMessage(config.internalErrorMessage, config.spawnCommand));
             });
-            pendingSpawns.add(player.getUUID(), guarded);
+            pendingTeleports.add(player.getUUID(), guarded);
             return 1;
         } catch (TeleportService.PassengerTreeTooLarge tooLarge) {
             sendSafely(player, commandMessage(config.passengerTreeTooLargeMessage, config.spawnCommand));
@@ -557,6 +580,18 @@ public final class Commands {
         };
     }
 
+    static PendingWork<HomeDestination.Result> pendingHomeRoute(HomeDestination.Pending home) {
+        return new PendingWork<>() {
+            @Override
+            public PendingStep<HomeDestination.Result> step(int candidateBudget, int worldWorkBudget) {
+                return home.step(candidateBudget, worldWorkBudget);
+            }
+
+            @Override public int closeWork() { return home.closeWork(); }
+            @Override public void close() { home.close(); }
+        };
+    }
+
     static PendingWork<SpawnDestination.Result> pendingSpawnRoute(SpawnDestination.Pending search) {
         return new PendingWork<>() {
             @Override
@@ -587,7 +622,7 @@ public final class Commands {
     void tick() {
         try {
             pendingTickEpoch++;
-            pendingSpawns.tick(SEARCH_CANDIDATES_PER_TICK, serverWork,
+            pendingTeleports.tick(SEARCH_CANDIDATES_PER_TICK, serverWork,
                     Math.min(serverWork.remaining(), PENDING_ADVANCEMENT_WORK_PER_TICK), ignored -> { });
         } catch (RuntimeException failure) {
             LOGGER.error("Unexpected OMWH END_SERVER_TICK failure", failure);
@@ -600,11 +635,33 @@ public final class Commands {
     void cancelPendingForForcedSpawn(UUID playerId) { cancelPending(playerId); }
     void removePending(UUID playerId) { cancelPending(playerId); }
     void respawnPending(UUID playerId) { cancelPending(playerId); }
-    void clearPending() { pendingSpawns.clearTerminal(); }
+    void clearPending() { pendingTeleports.clearTerminal(); }
     int remainingServerWork() { return serverWork.remaining(); }
 
     private void cancelPending(UUID playerId) {
-        pendingSpawns.cancel(playerId, serverWork);
+        pendingTeleports.cancel(playerId, serverWork);
+    }
+
+    private int completeHome(ServerPlayer player, HomeDestination.Result destination) {
+        return switch (destination.outcome()) {
+            case NO_HOME -> {
+                send(player, commandMessage(config.noHomepointMessage, config.homeCommand));
+                yield 0;
+            }
+            case CROSS_DIMENSION -> {
+                send(player, commandMessage(config.crossDimensionMessage, config.homeCommand));
+                yield 0;
+            }
+            case VEHICLE_TOO_LARGE -> {
+                send(player, commandMessageWithForceGuidance(config.vehicleTooLargeMessage, config.homeCommand));
+                yield 0;
+            }
+            case UNSAFE -> {
+                send(player, commandMessageWithForceGuidance(config.unsafeHomeMessage, config.homeCommand));
+                yield 0;
+            }
+            case ACCEPT -> teleport(player, destination.destination(), true, true);
+        };
     }
 
     private int completeSpawn(ServerPlayer player, SpawnDestination.Result destination) {
