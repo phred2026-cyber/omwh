@@ -6,6 +6,7 @@ import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.entity.Entity;
 import net.minecraft.world.entity.EntityDimensions;
+import net.minecraft.world.entity.Pose;
 import net.minecraft.world.level.block.BedBlock;
 import net.minecraft.world.level.block.RespawnAnchorBlock;
 import net.minecraft.world.level.block.state.BlockState;
@@ -16,21 +17,16 @@ import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
 import java.util.function.BooleanSupplier;
-import java.util.function.Supplier;
 
 public final class HomeDestination {
-    enum Decision { ACCEPT, NO_HOME, CROSS_DIMENSION }
-    enum Outcome { ACCEPT, NO_HOME, CROSS_DIMENSION, VEHICLE_TOO_LARGE, UNSAFE }
-    enum MountedChoice { EXACT, ABOVE_BED, VEHICLE_TOO_LARGE, UNSAFE }
+    enum Decision { ACCEPT, NO_HOME, CURRENT_WORLD_UNAVAILABLE, CROSS_DIMENSION }
+    enum Outcome { ACCEPT, NO_HOME, CURRENT_WORLD_UNAVAILABLE, CROSS_DIMENSION, VEHICLE_TOO_LARGE, UNSAFE }
+    enum MountedChoice { EXACT, ABOVE_BED, NEEDS_FALLBACK, VEHICLE_TOO_LARGE, UNSAFE }
     record Result(Outcome outcome, DestinationSafety.Prepared destination) { }
     record RespawnAuthority(Object selectedLevel, Object dimension, BlockPos pos,
                             float yaw, float pitch, boolean forced) { }
     record SavedHome(ServerPlayer player, ServerLevel currentLevel, ServerLevel savedLevel,
                      BlockPos homeBlock, boolean forcedRespawn, RespawnAuthority authority) {
-        SavedHome(ServerPlayer player, ServerLevel currentLevel, ServerLevel savedLevel,
-                  BlockPos homeBlock, boolean forcedRespawn) {
-            this(player, currentLevel, savedLevel, homeBlock, forcedRespawn, null);
-        }
     }
     record PreparedSavedHome(SavedHome home) { }
     record ResolvedHome(PreparedSavedHome prepared, TeleportTransition respawn, Entity root) { }
@@ -47,7 +43,7 @@ public final class HomeDestination {
     static final int VANILLA_HOME_STATE_INSPECTION_WORK = 2;
     static final int VANILLA_DISMOUNT_DIRECT_BLOCK_READS = 6;
     static final int VANILLA_PLAYER_COLLISION_OWNER_CELLS = 3 * 5 * 3;
-    static final int VANILLA_COLLISION_CELL_WORK = 1 + 8;
+    static final int VANILLA_COLLISION_CELL_WORK = DestinationSafety.MAX_PROBE_CELL_WORK;
     static final int MAX_VANILLA_DISMOUNT_PASSES = 2 * ANCHOR_DISMOUNT_CANDIDATES;
     static final int MAX_VANILLA_RESOLUTION_WORK = VANILLA_HOME_STATE_INSPECTION_WORK
             + MAX_VANILLA_DISMOUNT_PASSES
@@ -63,24 +59,18 @@ public final class HomeDestination {
 
     interface HomeAccess {
         Validation validate();
-        default RespawnAuthority currentAuthority(SavedHome home) { return home.authority(); }
+        RespawnAuthority currentAuthority(SavedHome home);
         PreparedSavedHome prepare(SavedHome home);
-        default List<TerrainRead> resolutionTerrain(SavedHome home) { return List.of(); }
+        List<TerrainRead> resolutionTerrain(SavedHome home);
         Resolution resolve(PreparedSavedHome prepared);
-        default TerrainRead initialSafetyTerrain(ResolvedHome resolved, boolean force) { return null; }
-        default SafetyEvaluation evaluateInitial(ResolvedHome resolved, boolean force) {
-            return new SafetyEvaluation(evaluate(resolved, force), null);
-        }
-        default Result evaluateFallback(ResolvedHome resolved) {
-            throw new IllegalStateException("home safety did not request a fallback");
-        }
-        Result evaluate(ResolvedHome resolved, boolean force);
     }
 
     private HomeDestination() { }
 
-    static Decision decide(boolean missingRespawnBlock, boolean savedLevelAvailable, boolean sameDimension,
+    static Decision decide(boolean currentWorldAvailable, boolean missingRespawnBlock,
+                           boolean savedLevelAvailable, boolean sameDimension,
                            boolean crossDimensionEnabled) {
+        if (!currentWorldAvailable) return Decision.CURRENT_WORLD_UNAVAILABLE;
         if (missingRespawnBlock || !savedLevelAvailable) return Decision.NO_HOME;
         if (!sameDimension && !crossDimensionEnabled) return Decision.CROSS_DIMENSION;
         return Decision.ACCEPT;
@@ -110,20 +100,12 @@ public final class HomeDestination {
         if (exact == DestinationSafety.HomeFit.FITS) return MountedChoice.EXACT;
         if (exact == DestinationSafety.HomeFit.UNSAFE) return MountedChoice.UNSAFE;
         if (!mayTryFallback) return MountedChoice.VEHICLE_TOO_LARGE;
+        if (fallback == null) return MountedChoice.NEEDS_FALLBACK;
         if (fallback == DestinationSafety.HomeFit.FITS) return MountedChoice.ABOVE_BED;
         if (fallback == DestinationSafety.HomeFit.UNSAFE) return MountedChoice.UNSAFE;
         return MountedChoice.VEHICLE_TOO_LARGE;
     }
 
-    static Outcome mountedGeometryOutcome(int width, int clearHeight,
-                                          Supplier<DestinationSafety.HomeFit> safety) {
-        if (!DestinationSafety.rootGeometrySupported(width, clearHeight)) return Outcome.VEHICLE_TOO_LARGE;
-        return safety.get() == DestinationSafety.HomeFit.FITS ? Outcome.ACCEPT : Outcome.UNSAFE;
-    }
-
-    static Result find(ServerPlayer player, boolean force, boolean crossDimensionEnabled) {
-        return find(force, new MinecraftHomeAccess(player, crossDimensionEnabled));
-    }
 
     static Plan plan(ServerPlayer player, boolean force, boolean crossDimensionEnabled) {
         MinecraftHomeAccess access = new MinecraftHomeAccess(player, crossDimensionEnabled);
@@ -137,28 +119,20 @@ public final class HomeDestination {
         return new Plan(null, new Pending(force, access, home, preparation));
     }
 
-    static Result find(boolean force, HomeAccess access) {
-        Validation validation = access.validate();
-        if (validation.outcome() != Outcome.ACCEPT) return new Result(validation.outcome(), null);
-        PreparedSavedHome prepared = access.prepare(validation.home());
-        Resolution resolution = access.resolve(prepared);
-        if (resolution.outcome() != Outcome.ACCEPT) return new Result(resolution.outcome(), null);
-        return access.evaluate(resolution.home(), force);
-    }
 
-    static Commands.PendingWork<Void> candidateTerrain(
+    static OmwhCommands.PendingWork<Void> candidateTerrain(
             DestinationSafety.ChunkPreparation preparation,
             Iterator<TerrainRead> candidates) {
-        return new Commands.PendingWork<>() {
+        return new OmwhCommands.PendingWork<>() {
             private TerrainRead active;
 
             @Override
-            public Commands.PendingStep<Void> step(int candidateBudget, int worldWorkBudget) {
+            public OmwhCommands.PendingStep<Void> step(int candidateBudget, int worldWorkBudget) {
                 int candidatesStarted = 0;
                 if (active == null) {
-                    if (!candidates.hasNext()) return Commands.PendingStep.complete(null, 0, 0);
+                    if (!candidates.hasNext()) return OmwhCommands.PendingStep.complete(null, 0, 0);
                     if (candidateBudget <= 0 || worldWorkBudget <= 0) {
-                        return Commands.PendingStep.pending(0, 0);
+                        return OmwhCommands.PendingStep.pending(0, 0);
                     }
                     active = candidates.next();
                     preparation.requireTerrainRead(active);
@@ -167,13 +141,13 @@ public final class HomeDestination {
                 int prepared = preparation.prepare(
                         SpawnDestination.PREPARATION_CHUNKS_PER_VISIT, worldWorkBudget);
                 if (!preparation.terrainReadReady(active)) {
-                    return Commands.PendingStep.pending(candidatesStarted, prepared);
+                    return OmwhCommands.PendingStep.pending(candidatesStarted, prepared);
                 }
                 active = null;
                 if (candidates.hasNext()) {
-                    return Commands.PendingStep.pending(candidatesStarted, prepared);
+                    return OmwhCommands.PendingStep.pending(candidatesStarted, prepared);
                 }
-                return Commands.PendingStep.complete(null, candidatesStarted, prepared);
+                return OmwhCommands.PendingStep.complete(null, candidatesStarted, prepared);
             }
 
             @Override public int closeWork() { return preparation.closeWork(); }
@@ -184,6 +158,10 @@ public final class HomeDestination {
     static List<TerrainRead> vanillaResolutionTerrain(BlockPos homeBlock, BlockState homeState,
                                                        boolean bunkBed, float yaw,
                                                        EntityDimensions standingDimensions) {
+        // Minecraft 26.2 coupling: this mirrors RespawnAnchorBlock.findStandUpPosition and
+        // BedBlock.findStandUpPosition/Player.findRespawnPositionAndUseSpawnBlock read order.
+        // Re-derive the candidates and collision-owner shell from mapped vanilla source on update;
+        // loading fewer chunks changes a cold-world home from pending to a false denial.
         if (homeState.getBlock() instanceof RespawnAnchorBlock) {
             List<int[]> offsets = new ArrayList<>(ANCHOR_DISMOUNT_CANDIDATES);
             int[][] horizontal = {{0, -1}, {-1, 0}, {0, 1}, {1, 0},
@@ -240,21 +218,13 @@ public final class HomeDestination {
         private final HomeAccess access;
         private final DestinationSafety.ChunkPreparation preparation;
         private final SavedHome home;
-        private Commands.PendingWork<Void> terrain;
+        private OmwhCommands.PendingWork<Void> terrain;
         private boolean resolutionTerrainChosen;
         private ResolvedHome resolved;
         private boolean initialSafetyEvaluated;
         private boolean fallbackRequested;
         private Result result;
 
-        static Pending controlled(boolean force, HomeAccess access, SavedHome home,
-                                  DestinationSafety.ChunkPreparation preparation,
-                                  Iterator<TerrainRead> candidates) {
-            Pending pending = new Pending(force, access, home, preparation);
-            pending.resolutionTerrainChosen = true;
-            pending.terrain = candidateTerrain(preparation, candidates);
-            return pending;
-        }
 
         Pending(boolean force, HomeAccess access, SavedHome home,
                 DestinationSafety.ChunkPreparation preparation) {
@@ -267,75 +237,75 @@ public final class HomeDestination {
                     List.of(new TerrainRead(block.getX(), block.getX(), block.getZ(), block.getZ())).iterator());
         }
 
-        Commands.PendingStep<Result> step(int candidateBudget, int worldWorkBudget) {
+        OmwhCommands.PendingStep<Result> step(int candidateBudget, int worldWorkBudget) {
             if (result != null) throw new IllegalStateException("pending home is already complete");
             if (!authorityCurrent()) {
                 result = new Result(Outcome.NO_HOME, null);
-                return Commands.PendingStep.complete(result, 0, 0);
+                return OmwhCommands.PendingStep.complete(result, 0, 0);
             }
             int candidatesUsed = 0;
             int worldWorkUsed = 0;
             if (terrain != null) {
-                Commands.PendingStep<Void> prepared = terrain.step(candidateBudget, worldWorkBudget);
+                OmwhCommands.PendingStep<Void> prepared = terrain.step(candidateBudget, worldWorkBudget);
                 candidatesUsed = prepared.candidatesUsed();
                 worldWorkUsed = prepared.worldWorkUsed();
-                if (!prepared.complete()) return Commands.PendingStep.pending(candidatesUsed, worldWorkUsed);
+                if (!prepared.complete()) return OmwhCommands.PendingStep.pending(candidatesUsed, worldWorkUsed);
                 if (!resolutionTerrainChosen) {
                     if (worldWorkBudget - worldWorkUsed < VANILLA_HOME_STATE_INSPECTION_WORK) {
-                        return Commands.PendingStep.pending(candidatesUsed, worldWorkUsed);
+                        return OmwhCommands.PendingStep.pending(candidatesUsed, worldWorkUsed);
                     }
                     worldWorkUsed += VANILLA_HOME_STATE_INSPECTION_WORK;
                     resolutionTerrainChosen = true;
                     terrain = candidateTerrain(preparation, access.resolutionTerrain(home).iterator());
-                    return Commands.PendingStep.pending(candidatesUsed, worldWorkUsed);
+                    return OmwhCommands.PendingStep.pending(candidatesUsed, worldWorkUsed);
                 }
                 terrain = null;
             }
 
             if (resolved == null) {
                 if (worldWorkBudget - worldWorkUsed < VANILLA_RESPAWN_RESOLUTION_WORK) {
-                    return Commands.PendingStep.pending(candidatesUsed, worldWorkUsed);
+                    return OmwhCommands.PendingStep.pending(candidatesUsed, worldWorkUsed);
                 }
                 worldWorkUsed += VANILLA_RESPAWN_RESOLUTION_WORK;
                 Resolution resolution = access.resolve(access.prepare(home));
                 if (resolution.outcome() != Outcome.ACCEPT) {
                     result = new Result(resolution.outcome(), null);
-                    return Commands.PendingStep.complete(result, candidatesUsed, worldWorkUsed);
+                    return OmwhCommands.PendingStep.complete(result, candidatesUsed, worldWorkUsed);
                 }
                 resolved = resolution.home();
-                TerrainRead initial = access.initialSafetyTerrain(resolved, force);
+                TerrainRead initial = initialSafetyTerrain(resolved, force);
                 if (initial != null) {
                     terrain = candidateTerrain(preparation, List.of(initial).iterator());
-                    return Commands.PendingStep.pending(candidatesUsed, worldWorkUsed);
+                    return OmwhCommands.PendingStep.pending(candidatesUsed, worldWorkUsed);
                 }
             }
 
             if (!initialSafetyEvaluated) {
                 if (worldWorkBudget - worldWorkUsed < INITIAL_HOME_SAFETY_WORK) {
-                    return Commands.PendingStep.pending(candidatesUsed, worldWorkUsed);
+                    return OmwhCommands.PendingStep.pending(candidatesUsed, worldWorkUsed);
                 }
                 worldWorkUsed += INITIAL_HOME_SAFETY_WORK;
                 initialSafetyEvaluated = true;
-                SafetyEvaluation evaluated = access.evaluateInitial(resolved, force);
+                SafetyEvaluation evaluated = evaluateInitial(resolved, force);
                 if (evaluated.result() != null) {
                     result = evaluated.result();
-                    return Commands.PendingStep.complete(result, candidatesUsed, worldWorkUsed);
+                    return OmwhCommands.PendingStep.complete(result, candidatesUsed, worldWorkUsed);
                 }
                 if (evaluated.fallbackTerrain() == null) {
                     throw new IllegalStateException("home safety requested no result and no fallback terrain");
                 }
                 fallbackRequested = true;
                 terrain = candidateTerrain(preparation, List.of(evaluated.fallbackTerrain()).iterator());
-                return Commands.PendingStep.pending(candidatesUsed, worldWorkUsed);
+                return OmwhCommands.PendingStep.pending(candidatesUsed, worldWorkUsed);
             }
 
             if (!fallbackRequested) throw new IllegalStateException("home safety completed without a result");
             if (worldWorkBudget - worldWorkUsed < FALLBACK_HOME_SAFETY_WORK) {
-                return Commands.PendingStep.pending(candidatesUsed, worldWorkUsed);
+                return OmwhCommands.PendingStep.pending(candidatesUsed, worldWorkUsed);
             }
             worldWorkUsed += FALLBACK_HOME_SAFETY_WORK;
-            result = access.evaluateFallback(resolved);
-            return Commands.PendingStep.complete(result, candidatesUsed, worldWorkUsed);
+            result = evaluateFallback(resolved);
+            return OmwhCommands.PendingStep.complete(result, candidatesUsed, worldWorkUsed);
         }
 
         int closeWork() { return preparation.closeWork(); }
@@ -352,7 +322,7 @@ public final class HomeDestination {
         Entity root = resolved.root();
         if (root == home.player()) {
             DestinationSafety.Bounds occupied = DestinationSafety.standingPlayerBounds(
-                    resolved.respawn().position(), home.player().getDimensions(net.minecraft.world.entity.Pose.STANDING));
+                    resolved.respawn().position(), home.player().getDimensions(Pose.STANDING));
             return terrain(DestinationSafety.homeHazardCells(occupied));
         }
         DestinationSafety.Bounds rootBounds = DestinationSafety.boundsAt(root, resolved.respawn().position());
@@ -385,15 +355,17 @@ public final class HomeDestination {
         BlockPos homeBlock = home.homeBlock();
         DestinationSafety.HomeFit exactFit = DestinationSafety.mountedHomeFit(
                 root, respawn.newLevel(), respawn.position(), homeBlock);
-        if (exactFit == DestinationSafety.HomeFit.FITS) {
-            return new SafetyEvaluation(acceptedMounted(resolved, respawn.position()), null);
-        }
-        if (exactFit == DestinationSafety.HomeFit.UNSAFE) {
-            return new SafetyEvaluation(new Result(Outcome.UNSAFE, null), null);
-        }
         boolean bed = respawn.newLevel().getBlockState(homeBlock).getBlock() instanceof BedBlock;
         boolean covered = bed && isCoveredBed(respawn.newLevel(), homeBlock);
-        if (!mayTryAboveBed(true, bed, home.forcedRespawn(), covered)) {
+        MountedChoice choice = chooseMounted(exactFit,
+                mayTryAboveBed(true, bed, home.forcedRespawn(), covered), null);
+        if (choice == MountedChoice.EXACT) {
+            return new SafetyEvaluation(acceptedMounted(resolved, respawn.position()), null);
+        }
+        if (choice == MountedChoice.UNSAFE) {
+            return new SafetyEvaluation(new Result(Outcome.UNSAFE, null), null);
+        }
+        if (choice == MountedChoice.VEHICLE_TOO_LARGE) {
             return new SafetyEvaluation(new Result(Outcome.VEHICLE_TOO_LARGE, null), null);
         }
         Vec3 aboveBed = aboveBed(homeBlock);
@@ -407,10 +379,11 @@ public final class HomeDestination {
         Vec3 aboveBed = aboveBed(homeBlock);
         DestinationSafety.HomeFit fallback = DestinationSafety.mountedHomeFit(
                 resolved.root(), resolved.respawn().newLevel(), aboveBed, homeBlock);
-        return switch (fallback) {
-            case FITS -> acceptedMounted(resolved, aboveBed);
+        return switch (chooseMounted(DestinationSafety.HomeFit.BLOCKED, true, fallback)) {
+            case ABOVE_BED -> acceptedMounted(resolved, aboveBed);
             case UNSAFE -> new Result(Outcome.UNSAFE, null);
-            case BLOCKED -> new Result(Outcome.VEHICLE_TOO_LARGE, null);
+            case VEHICLE_TOO_LARGE -> new Result(Outcome.VEHICLE_TOO_LARGE, null);
+            case EXACT, NEEDS_FALLBACK -> throw new IllegalStateException("invalid mounted fallback decision");
         };
     }
 
@@ -444,14 +417,17 @@ public final class HomeDestination {
 
         @Override
         public Validation validate() {
+            ServerLevel current = player.level() instanceof ServerLevel level ? level : null;
             var respawnConfig = player.getRespawnConfig();
-            if (respawnConfig == null) return new Validation(Outcome.NO_HOME, null);
-            if (!(player.level() instanceof ServerLevel current)) return new Validation(Outcome.UNSAFE, null);
+            Decision initial = decide(current != null, respawnConfig == null, true, true,
+                    crossDimensionEnabled);
+            if (initial != Decision.ACCEPT) return new Validation(outcome(initial), null);
+
             ServerLevel savedLevel = current.getServer().getLevel(respawnConfig.respawnData().dimension());
-            if (savedLevel == null) return new Validation(Outcome.NO_HOME, null);
-            if (!current.dimension().equals(savedLevel.dimension()) && !crossDimensionEnabled) {
-                return new Validation(Outcome.CROSS_DIMENSION, null);
-            }
+            Decision decision = decide(true, false, savedLevel != null,
+                    savedLevel != null && current.dimension().equals(savedLevel.dimension()),
+                    crossDimensionEnabled);
+            if (decision != Decision.ACCEPT) return new Validation(outcome(decision), null);
             RespawnAuthority authority = authority(respawnConfig, savedLevel);
             return new Validation(Outcome.ACCEPT, new SavedHome(player, current, savedLevel,
                     respawnConfig.respawnData().pos(), respawnConfig.forced(), authority));
@@ -478,7 +454,7 @@ public final class HomeDestination {
                     && home.savedLevel().getBlockState(home.homeBlock().below()).getBlock() instanceof BedBlock;
             float yaw = home.authority().yaw();
             return vanillaResolutionTerrain(home.homeBlock(), state, bunkBed, yaw,
-                    home.player().getDimensions(net.minecraft.world.entity.Pose.STANDING));
+                    home.player().getDimensions(Pose.STANDING));
         }
 
         private static RespawnAuthority authority(ServerPlayer.RespawnConfig config, ServerLevel selectedLevel) {
@@ -492,30 +468,23 @@ public final class HomeDestination {
             // false preserves respawn-anchor charges; vanilla remains the authority for placement.
             TeleportTransition respawn = player.findRespawnPositionAndUseSpawnBlock(
                     false, TeleportTransition.DO_NOTHING);
-            if (respawn.missingRespawnBlock()) return new Resolution(Outcome.NO_HOME, null);
+            Decision decision = decide(true, respawn.missingRespawnBlock(), true, true,
+                    crossDimensionEnabled);
+            if (decision != Decision.ACCEPT) return new Resolution(outcome(decision), null);
             return new Resolution(Outcome.ACCEPT,
                     new ResolvedHome(prepared, respawn, player.getRootVehicle()));
         }
 
-        @Override
-        public TerrainRead initialSafetyTerrain(ResolvedHome resolved, boolean force) {
-            return HomeDestination.initialSafetyTerrain(resolved, force);
-        }
 
-        @Override
-        public SafetyEvaluation evaluateInitial(ResolvedHome resolved, boolean force) {
-            return HomeDestination.evaluateInitial(resolved, force);
-        }
+    }
 
-        @Override
-        public Result evaluateFallback(ResolvedHome resolved) {
-            return HomeDestination.evaluateFallback(resolved);
-        }
-
-        @Override
-        public Result evaluate(ResolvedHome resolved, boolean force) {
-            return HomeDestination.evaluate(resolved, force);
-        }
+    private static Outcome outcome(Decision decision) {
+        return switch (decision) {
+            case ACCEPT -> Outcome.ACCEPT;
+            case NO_HOME -> Outcome.NO_HOME;
+            case CURRENT_WORLD_UNAVAILABLE -> Outcome.CURRENT_WORLD_UNAVAILABLE;
+            case CROSS_DIMENSION -> Outcome.CROSS_DIMENSION;
+        };
     }
 
     private static boolean isCoveredBed(ServerLevel level, BlockPos homeBlock) {

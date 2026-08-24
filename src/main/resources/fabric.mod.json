@@ -3,7 +3,8 @@
   "id": "omwh",
   "version": "${version}",
   "name": "OMWH",
-  "description": "Server-side /home and /spawn commands that use Minecraft's existing home and world-spawn destinations and bring mounted vehicles and passengers with you.",
+  "description": "On My Way Home adds server-side /home and /spawn commands that use Minecraft's saved-home and world-spawn destinations and bring mounted groups with you.",
+  "license": "CC0-1.0",
   "authors": [
     "PyreHaven"
   ],

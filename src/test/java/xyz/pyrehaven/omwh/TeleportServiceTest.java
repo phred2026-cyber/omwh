@@ -248,25 +248,25 @@ public final class TeleportServiceTest {
         Node passenger = root.add(Node.entity("passenger", source));
         TeleportService.LifecycleFence<Node> fence = TeleportService.captureLifecycle(
                 player, root, source, true, 2.0, 1.5, NODE_TREE);
-        check(TeleportService.isLifecycleCurrent(fence, player, root, source,
+        check(isLifecycleCurrent(fence, player, root, source,
                         true, 2.0, 1.5, true, true, NODE_TREE),
                 "unchanged exact player/root/tree/geometry remains current");
-        check(!TeleportService.isLifecycleCurrent(fence, Node.player("respawn", source), root, source,
+        check(!isLifecycleCurrent(fence, Node.player("respawn", source), root, source,
                         true, 2.0, 1.5, true, true, NODE_TREE), "respawned player object rejected");
-        check(!TeleportService.isLifecycleCurrent(fence, player, root, new Object(),
+        check(!isLifecycleCurrent(fence, player, root, new Object(),
                         true, 2.0, 1.5, true, true, NODE_TREE), "dimension change rejected");
-        check(!TeleportService.isLifecycleCurrent(fence, player, player, source,
+        check(!isLifecycleCurrent(fence, player, player, source,
                         false, 2.0, 1.5, true, true, NODE_TREE), "dismount/root change rejected");
-        check(!TeleportService.isLifecycleCurrent(fence, player, root, source,
+        check(!isLifecycleCurrent(fence, player, root, source,
                         true, 2.25, 1.5, true, true, NODE_TREE), "root geometry change rejected");
-        check(!TeleportService.isLifecycleCurrent(fence, player, root, source,
+        check(!isLifecycleCurrent(fence, player, root, source,
                         true, 2.0, 1.5, false, true, NODE_TREE), "disconnect rejected");
-        check(!TeleportService.isLifecycleCurrent(fence, player, root, source,
+        check(!isLifecycleCurrent(fence, player, root, source,
                         true, 2.0, 1.5, true, false, NODE_TREE), "death rejected");
 
         root.children.remove(passenger);
         passenger.parent = null;
-        check(!TeleportService.isLifecycleCurrent(fence, player, root, source,
+        check(!isLifecycleCurrent(fence, player, root, source,
                         true, 2.0, 1.5, true, true, NODE_TREE), "passenger UUID/edge change rejected");
     }
 
@@ -409,6 +409,14 @@ public final class TeleportServiceTest {
 
     private static void check(boolean condition, String behavior) {
         if (!condition) throw new AssertionError(behavior);
+    }
+
+    private static <T> boolean isLifecycleCurrent(
+            TeleportService.LifecycleFence<T> fence, T player, T root, Object sourceLevel,
+            boolean mounted, double rootWidth, double rootHeight,
+            boolean connected, boolean alive, TeleportService.EntityTree<T> tree) {
+        return TeleportService.lifecycleStatus(fence, player, root, sourceLevel, mounted,
+                rootWidth, rootHeight, connected, alive, tree) == TeleportService.LifecycleStatus.CURRENT;
     }
 
     private static final class Node {

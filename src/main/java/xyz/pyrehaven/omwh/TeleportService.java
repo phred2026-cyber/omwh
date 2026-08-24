@@ -30,25 +30,25 @@ public final class TeleportService {
             + MAX_PASSENGER_TREE_EDGES * SNAPSHOT_EDGE_PASSES + SNAPSHOT_FIXED_WORK;
     static final int LIFECYCLE_CAPTURE_WORK = SNAPSHOT_WORK
             + MAX_PASSENGER_TREE_NODES + 1;
-    static final int LIFECYCLE_VALIDATION_WORK = SNAPSHOT_WORK
-            + MAX_PASSENGER_TREE_NODES
-            + MAX_PASSENGER_TREE_EDGES
-            + MAX_PASSENGER_TREE_NODES
-            + MAX_PASSENGER_TREE_NODES
-            + 10;
-    static final int COMPLETION_WORK = SNAPSHOT_WORK
-            + MAX_PASSENGER_TREE_NODES
-            + MAX_PASSENGER_TREE_NODES + MAX_PASSENGER_TREE_EDGES
-            + SNAPSHOT_WORK
-            + 1 + MAX_PASSENGER_TREE_NODES + MAX_PASSENGER_TREE_EDGES
-            + 2 * MAX_PASSENGER_TREE_NODES
-            + MAX_PASSENGER_TREE_EDGES
-            + MAX_PASSENGER_TREE_NODES
-            + MAX_PASSENGER_TREE_NODES
-            + 2 * MAX_PASSENGER_TREE_NODES
-            + 2 * MAX_PASSENGER_TREE_NODES
-            + 3
-            + MAX_PASSENGER_TREE_EDGES;
+    static final int LIFECYCLE_VALIDATION_WORK = SNAPSHOT_WORK // rebuild the current UUID/entity/edge snapshot
+            + MAX_PASSENGER_TREE_NODES // validate every current source-level entity
+            + MAX_PASSENGER_TREE_EDGES // compare the parent-edge map
+            + MAX_PASSENGER_TREE_NODES // compare the entity UUID set
+            + MAX_PASSENGER_TREE_NODES // compare each retained entity identity
+            + 10; // connected, alive, player/root/level/mounted, geometry, and player-UUID checks
+    static final int COMPLETION_WORK = SNAPSHOT_WORK // capture the pre-mutation passenger tree
+            + MAX_PASSENGER_TREE_NODES // validate every source-level entity
+            + MAX_PASSENGER_TREE_NODES + MAX_PASSENGER_TREE_EDGES // compare moved UUIDs and parent edges
+            + SNAPSHOT_WORK // capture the moved passenger tree
+            + 1 + MAX_PASSENGER_TREE_NODES + MAX_PASSENGER_TREE_EDGES // root UUID, entity UUIDs, and parent edges
+            + 2 * MAX_PASSENGER_TREE_NODES // validate moved server-side state and destination level
+            + MAX_PASSENGER_TREE_EDGES // verify each live parent attachment
+            + MAX_PASSENGER_TREE_NODES // verify retained player identities
+            + MAX_PASSENGER_TREE_NODES // clear root velocity plus bounded moved-tree traversal
+            + 2 * MAX_PASSENGER_TREE_NODES // refresh player tracking and non-player tracking
+            + 2 * MAX_PASSENGER_TREE_NODES // collect and type-check passenger players
+            + 3 // mutation dispatch and completion outcome transitions
+            + MAX_PASSENGER_TREE_EDGES; // conservative reconciliation exception allowance
 
     static final class PassengerTreeTooLarge extends IllegalStateException {
         PassengerTreeTooLarge() {
@@ -113,8 +113,11 @@ public final class TeleportService {
                 root.getBbWidth(), root.getBbHeight(), ENTITY_TREE);
     }
 
-    static boolean isLifecycleCurrent(LifecycleFence<Entity> fence) {
-        return lifecycleStatus(fence) == LifecycleStatus.CURRENT;
+
+    static void validatePassengerTreeForImmediateTeleport(ServerPlayer player) {
+        // Immediate routes do not retain a fence, but must reject an oversized or invalid tree
+        // before effects and world mutation consume the work reserved for lifecycle capture.
+        captureLifecycle(player);
     }
 
     static LifecycleStatus lifecycleStatus(LifecycleFence<Entity> fence) {
@@ -137,13 +140,6 @@ public final class TeleportService {
                 rootWidth, rootHeight, snapshot);
     }
 
-    static <T> boolean isLifecycleCurrent(LifecycleFence<T> fence, T player, T root,
-                                          Object sourceLevel, boolean mounted,
-                                          double rootWidth, double rootHeight,
-                                          boolean connected, boolean alive, EntityTree<T> tree) {
-        return lifecycleStatus(fence, player, root, sourceLevel, mounted, rootWidth, rootHeight,
-                connected, alive, tree) == LifecycleStatus.CURRENT;
-    }
 
     static <T> LifecycleStatus lifecycleStatus(LifecycleFence<T> fence, T player, T root,
                                                Object sourceLevel, boolean mounted,

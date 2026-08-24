@@ -31,7 +31,17 @@ public final class Cooldowns {
                 expiry));
     }
 
-    void recordIncomingDamageAllowedByOmwh(UUID victim, UUID playerAttacker) {
+    void afterDamage(UUID victim, UUID playerAttacker, float damage, boolean blocked) {
+        if (blocked || damage <= 0.0f) return;
+        recordAppliedDamage(victim, playerAttacker);
+    }
+
+    void afterDeath(UUID victim, UUID playerAttacker) {
+        // Fabric does not emit AFTER_DAMAGE for fatal hits, so death is the sole fatal path.
+        recordAppliedDamage(victim, playerAttacker);
+    }
+
+    private void recordAppliedDamage(UUID victim, UUID playerAttacker) {
         if (playerAttacker != null && !playerAttacker.equals(victim)) {
             if (!config.enablePvpCooldown) return;
             recordEvent(victim, Type.PVP, config.pvpCooldownSeconds);

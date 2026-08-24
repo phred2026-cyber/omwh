@@ -18,7 +18,7 @@ public final class Omwh implements ModInitializer {
     public void onInitialize() {
         OmwhConfig config = OmwhConfig.load();
         Cooldowns cooldowns = new Cooldowns(config);
-        Commands commands = new Commands(config, cooldowns);
+        OmwhCommands commands = new OmwhCommands(config, cooldowns);
 
         CommandRegistrationCallback.EVENT.register((dispatcher, registryAccess, environment) ->
                 commands.register(dispatcher));
@@ -26,23 +26,27 @@ public final class Omwh implements ModInitializer {
                 cooldowns.recordJoin(handler.player.getUUID()));
         ServerPlayConnectionEvents.DISCONNECT.register((handler, server) -> {
             cooldowns.remove(handler.player.getUUID());
-            commands.removePending(handler.player.getUUID());
+            commands.cancelPending(handler.player.getUUID());
         });
         ServerPlayerEvents.AFTER_RESPAWN.register((oldPlayer, newPlayer, alive) ->
-                commands.respawnPending(oldPlayer.getUUID()));
+                commands.cancelPending(oldPlayer.getUUID()));
         ServerTickEvents.END_SERVER_TICK.register(server -> commands.tick());
         ServerLifecycleEvents.SERVER_STOPPED.register(server -> commands.clearPending());
-        ServerLivingEntityEvents.ALLOW_DAMAGE.register((entity, source, amount) -> {
+        ServerLivingEntityEvents.AFTER_DAMAGE.register((entity, source, baseDamage, damage, blocked) -> {
             if (entity instanceof ServerPlayer victim) {
-                if (source.getEntity() instanceof ServerPlayer attacker) {
-                    cooldowns.recordIncomingDamageAllowedByOmwh(victim.getUUID(), attacker.getUUID());
-                } else {
-                    cooldowns.recordIncomingDamageAllowedByOmwh(victim.getUUID(), null);
-                }
+                cooldowns.afterDamage(victim.getUUID(), playerAttacker(source), damage, blocked);
             }
-            return true;
+        });
+        ServerLivingEntityEvents.AFTER_DEATH.register((entity, source) -> {
+            if (entity instanceof ServerPlayer victim) {
+                cooldowns.afterDeath(victim.getUUID(), playerAttacker(source));
+            }
         });
 
         LOGGER.info("OMWH commands ready: /{}, /{}", config.homeCommand, config.spawnCommand);
+    }
+
+    private static java.util.UUID playerAttacker(net.minecraft.world.damagesource.DamageSource source) {
+        return source.getEntity() instanceof ServerPlayer attacker ? attacker.getUUID() : null;
     }
 }

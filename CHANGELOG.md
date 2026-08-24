@@ -1,6 +1,12 @@
 # Changelog
 
-## 1.2.0
+## [Unreleased]
+
+### Changed
+
+- No player-facing changes recorded yet.
+
+## [1.2.0] - 2026-08-24
 
 OMWH 1.2.0 expands dimension support, gives players an optional safety override, and makes mounted teleports and destination checks more predictable.
 
@@ -50,18 +56,30 @@ OMWH 1.2.0 expands dimension support, gives players an optional safety override,
 - Remove the old OMWH jar before installing 1.2.0. Leaving old and new jars together causes Fabric Loader to stop on a duplicate mod ID.
 - Normal `/home` and `/spawn` may stay pending while OMWH prepares only the terrain their current placement work needs. Neither command needs spawn-area pregeneration or permanent chunk loading.
 
-## 1.1.3
+## [1.1.3] - 2026-07-29
+
+### Fixed
 
 - Fixed `/home` moving mounted players and vehicles upward, sometimes onto roofs, when the home did not have enough room.
 - Fixed mounted `/home` and `/spawn` teleports sometimes leaving clients out of sync with vehicles and passengers.
 - `/spawn` now chooses nearby safe ground with enough support and clear space for the player or vehicle.
 
-## 1.1.0
+## [1.1.0] - 2026-03-01
+
+### Added
 
 - Added `config/omwh.json` for cooldowns, command names, messages, sounds, and particles.
 - Added Minecraft color-code and `{time}` support to configurable messages.
 
-## 1.0.0
+## [1.0.0] - 2026-03-01
+
+### Added
 
 - Added `/home` and `/spawn` with PvP, damage, join, and regular cooldowns.
 - Added teleport support for vehicles and mounts.
+
+[Unreleased]: https://github.com/ff-tech-xyz/omwh/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/ff-tech-xyz/omwh/compare/v1.1.3...v1.2.0
+[1.1.3]: https://github.com/ff-tech-xyz/omwh/compare/v1.1.0...v1.1.3
+[1.1.0]: https://github.com/ff-tech-xyz/omwh/releases/tag/v1.1.0
+[1.0.0]: https://github.com/ff-tech-xyz/omwh/releases/tag/v1.0.0

@@ -1,5 +1,8 @@
 package xyz.pyrehaven.omwh;
 
+import com.google.gson.JsonParseException;
+import com.google.gson.JsonParser;
+
 import java.nio.file.Files;
 import java.nio.file.Path;
 
@@ -13,6 +16,7 @@ public final class ConfigTest {
             messageDefaultsAreCompleteAndTyped(root);
             emptyAndUnreadableConfigsUseDefaults(root);
             malformedAndCoercedKnownTypesFailStartup(root);
+            reflectivePrimitiveValidationCannotOmitANewPersistedField();
             unknownFieldsRemainPermissive(root.resolve("unknown.json"));
             initialWriteFailureStillUsesDefaults(root);
             validationRejectsInvalidCommandsAndDurations();
@@ -79,7 +83,17 @@ public final class ConfigTest {
     private static void messageDefaultsAreCompleteAndTyped(Path root) throws Exception {
         Path defaultsPath = root.resolve("message-defaults.json");
         OmwhConfig defaults = OmwhConfig.load(defaultsPath);
-        check(defaults.internalErrorMessage.contains("{command}"), "internal error command placeholder");
+        check(defaults.internalErrorMessage.equals(
+                        "§cSomething went wrong with /{command}. Please let a server admin know."),
+                "internal error default directs players to an admin");
+        check(defaults.noHomepointMessage.equals(
+                        "§cYou don't have a home yet! Sleep in a bed or charge a respawn anchor first."),
+                "missing home default distinguishes home from world spawn");
+        check(defaults.busyMessage.equals("§cOMWH is busy right now. Please try /{command} again."),
+                "busy default gives an actionable retry without scheduler jargon");
+        check(defaults.partialTeleportMessage.equals(
+                        "§eCheck your group — some passengers may not have made the trip."),
+                "partial movement default leads with the player action");
         check(defaults.vehicleTooLargeMessage.toLowerCase().contains("dismount")
                         && defaults.vehicleTooLargeMessage.contains("{forceGuidance}"),
                 "vehicle-too-large default offers dismount and conditional force guidance");
@@ -127,6 +141,21 @@ public final class ConfigTest {
         expectFailure(() -> OmwhConfig.load(quotedForceBoolean), "quoted force boolean");
     }
 
+    private static void reflectivePrimitiveValidationCannotOmitANewPersistedField() {
+        class FutureConfig {
+            public boolean newPersistedFlag = true;
+            public transient boolean runtimeOnlyFlag;
+            public static boolean PROCESS_FLAG;
+        }
+        expectFailure(() -> OmwhConfig.requirePrimitiveTypes(
+                        JsonParser.parseString("{\"newPersistedFlag\":\"false\"}").getAsJsonObject(),
+                        FutureConfig.class),
+                "new persisted primitive participates in type validation automatically");
+        OmwhConfig.requirePrimitiveTypes(
+                JsonParser.parseString("{\"runtimeOnlyFlag\":\"false\",\"PROCESS_FLAG\":\"false\"}")
+                        .getAsJsonObject(), FutureConfig.class);
+    }
+
     private static void unknownFieldsRemainPermissive(Path path) throws Exception {
         Files.writeString(path, "{\"futureSetting\":{\"enabled\":true},"
                 + "\"rebuildEndPlatform\":{\"legacy\":true}}");
@@ -153,7 +182,7 @@ public final class ConfigTest {
         try {
             action.run();
             throw new AssertionError("Expected failure: " + behavior);
-        } catch (IllegalStateException | IllegalArgumentException expected) {
+        } catch (IllegalStateException | IllegalArgumentException | JsonParseException expected) {
             // expected
         }
     }

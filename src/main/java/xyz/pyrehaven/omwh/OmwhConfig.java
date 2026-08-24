@@ -13,31 +13,14 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.io.Reader;
 import java.io.Writer;
+import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.nio.file.Files;
 import java.nio.file.Path;
 
 public final class OmwhConfig {
     private static final Logger LOGGER = LoggerFactory.getLogger("omwh");
     private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
-    private static final String[] STRING_FIELDS = {
-            "homeCommand", "spawnCommand", "homeSuccessMessage", "spawnSuccessMessage",
-            "noHomepointMessage", "crossDimensionMessage", "unsafeHomeMessage", "unsafeSpawnMessage",
-            "pvpCooldownMessage", "damageCooldownMessage", "joinCooldownMessage", "regularCooldownMessage",
-            "internalErrorMessage", "vehicleTooLargeMessage", "forceGuidanceMessage", "partialTeleportMessage",
-            "spawnDisabledMessage", "spawnPendingMessage", "spawnAnchorChangedMessage", "busyMessage",
-            "passengerTreeTooLargeMessage", "currentWorldUnavailableMessage", "worldSpawnUnavailableMessage",
-            "passengerNotificationMessage", "homePassengerDestination", "spawnPassengerDestination"
-    };
-    private static final String[] BOOLEAN_FIELDS = {
-            "enableRegularCooldown", "enablePvpCooldown", "enableDamageCooldown",
-            "playTeleportSound", "spawnTeleportParticles", "enableForceOverride",
-            "enableCrossDimensionTeleport", "enableOverworldSpawn", "enableNetherSpawn", "enableEndSpawn",
-            "enableModdedDimensionSpawn"
-    };
-    private static final String[] INTEGER_FIELDS = {
-            "regularCooldownSeconds", "pvpCooldownSeconds", "damageCooldownSeconds", "joinCooldownSeconds"
-    };
-
     public String homeCommand = "home";
     public String spawnCommand = "spawn";
     public boolean enableRegularCooldown = true;
@@ -57,7 +40,7 @@ public final class OmwhConfig {
     public boolean enableModdedDimensionSpawn = false;
     public String homeSuccessMessage = "§aTeleported to your home!";
     public String spawnSuccessMessage = "§aTeleported to world spawn!";
-    public String noHomepointMessage = "§cYou don't have a spawn point set!";
+    public String noHomepointMessage = "§cYou don't have a home yet! Sleep in a bed or charge a respawn anchor first.";
     public String crossDimensionMessage = "§cYou are not powerful enough to bend space between dimensions. Use a portal first, then try again!";
     public String unsafeHomeMessage = "§cIt is not safe to teleport here.{forceGuidance}";
     public String unsafeSpawnMessage = "§cIt is not safe to teleport here.{forceGuidance}";
@@ -65,14 +48,14 @@ public final class OmwhConfig {
     public String damageCooldownMessage = "§cYou recently took damage! Please wait {time} seconds before teleporting.";
     public String joinCooldownMessage = "§cYou must wait {time} seconds after joining before teleporting!";
     public String regularCooldownMessage = "§cYou recently teleported! Please wait {time} seconds before trying again.";
-    public String internalErrorMessage = "§cInternal error executing /{command}. Check server log.";
+    public String internalErrorMessage = "§cSomething went wrong with /{command}. Please let a server admin know.";
     public String vehicleTooLargeMessage = "§cYour vehicle is too big. Dismount and try again.{forceGuidance}";
     public String forceGuidanceMessage = "\n§eUse /{command} force to teleport anyway.";
-    public String partialTeleportMessage = "§eMinecraft started moving your group, but OMWH could not verify every passenger. Check your group before moving again.";
+    public String partialTeleportMessage = "§eCheck your group — some passengers may not have made the trip.";
     public String spawnDisabledMessage = "§cSpawn teleporting is disabled for this dimension.";
     public String spawnPendingMessage = "§eA /{command} safety search is already in progress.";
     public String spawnAnchorChangedMessage = "§cWorld spawn changed while OMWH was checking safety. Please try /{command} again.";
-    public String busyMessage = "§cOMWH reached its server work limit for this tick. Please try /{command} again.";
+    public String busyMessage = "§cOMWH is busy right now. Please try /{command} again.";
     public String passengerTreeTooLargeMessage = "§cYour passenger group is too large for OMWH to teleport safely.";
     public String currentWorldUnavailableMessage = "§cCannot determine your current world.";
     public String worldSpawnUnavailableMessage = "§cCannot determine world spawn.";
@@ -125,9 +108,22 @@ public final class OmwhConfig {
     }
 
     private static void requirePrimitiveTypes(JsonObject object) {
-        for (String field : STRING_FIELDS) requireType(object, field, Type.STRING);
-        for (String field : BOOLEAN_FIELDS) requireType(object, field, Type.BOOLEAN);
-        for (String field : INTEGER_FIELDS) requireType(object, field, Type.INTEGER);
+        requirePrimitiveTypes(object, OmwhConfig.class);
+    }
+
+    static void requirePrimitiveTypes(JsonObject object, Class<?> configType) {
+        for (Field field : configType.getFields()) {
+            int modifiers = field.getModifiers();
+            if (Modifier.isStatic(modifiers) || Modifier.isTransient(modifiers)) continue;
+            Type type = switch (field.getType().getName()) {
+                case "java.lang.String" -> Type.STRING;
+                case "boolean" -> Type.BOOLEAN;
+                case "int" -> Type.INTEGER;
+                default -> throw new JsonParseException(
+                        field.getName() + " has unsupported persisted config type " + field.getType().getTypeName());
+            };
+            requireType(object, field.getName(), type);
+        }
     }
 
     private static void requireType(JsonObject object, String field, Type type) {

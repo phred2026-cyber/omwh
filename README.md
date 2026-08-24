@@ -1,86 +1,55 @@
-# OMWH
+# OMWH — On My Way Home
 
-OMWH is a Minecraft server mod that adds `/home` and `/spawn` without creating permanent warp points.
-
-There is no `/sethome` command. `/home` uses the respawn point Minecraft already stores for you, such as a bed or charged respawn anchor. `/spawn` brings you to the spawn destination selected for your current dimension.
-
-OMWH can bring your vehicle, mount, friends, and other passengers along. It also has configurable cooldowns for normal command use, damage, PvP, and joining the server.
+OMWH adds server-side `/home` and `/spawn` commands that use Minecraft's own saved-home and world-spawn destinations. Players can bring mounted vehicles and passengers without installing anything on their client.
 
 ## Commands
 
-### `/home`
+- `/home` goes to your bed or charged respawn anchor. Cross-dimension homes work when enabled.
+- `/spawn` goes to the configured destination for your current dimension, or to Overworld spawn when fallback routing is enabled.
+- `/home force` and `/spawn force` skip OMWH's destination-safety and vehicle-size checks when the server owner enables force commands. They do not bypass cooldowns, missing destinations, disabled dimension routes, unavailable worlds, or teleport failures.
 
-`/home` returns you to your valid Minecraft respawn point. Missing or destroyed homes are refused instead of sending you somewhere else. Normal `/home` also refuses blocked or unsafe homes; players can deliberately use `/home force` when force commands are enabled.
+Normal teleports check build height, world borders, support, fluids, hazards, collision, and the full mounted footprint. If terrain is not ready, OMWH spreads preparation and searching across server ticks instead of doing an unbounded burst of work. A force command still prepares Minecraft's destination terrain before moving anything.
 
-Cross-dimension homes are enabled by default. Server owners can disable them with `enableCrossDimensionTeleport`.
+## Cooldowns and feedback
 
-OMWH loads only the nearby terrain Minecraft needs to find and check that home, instead of loading a fixed area around it. If that terrain is not ready yet, `/home` may stay pending across server ticks.
+Server owners can configure regular, PvP, damage, and join cooldown durations. A duration of `0` disables that cooldown; join follows this rule without a separate enable switch. Messages, command names, sound, particles, force access, cross-dimension homes, and per-dimension spawn routing are configurable in `config/omwh.json`.
 
-### `/spawn`
+See [BEHAVIOR.md](BEHAVIOR.md) for player and server-owner behavior, and [CONFIGURATION.md](CONFIGURATION.md) for every field, default, placeholder, and validation rule.
 
-`/spawn` uses the destination allowed for the player's current dimension. Overworld spawn is enabled by default; Nether, End, and modded-dimension spawn destinations are disabled by default. A disabled dimension may fall back to Overworld spawn only when both cross-dimension teleporting and Overworld spawn are enabled.
+A small server-owner override can contain only the fields being changed. For example, this keeps `/spawn` in the Nether and disables force guidance while leaving all other fields at their defaults:
 
-Nether destinations use Minecraft's normal coordinate scaling. End destinations use the vanilla End arrival platform. For normal Overworld, Nether, and modded-dimension travel, OMWH starts at the spawn anchor and loads terrain only as each possible safe spot needs it. If the first spot is safe, farther search terrain is left alone.
+```json
+{
+  "enableNetherSpawn": true,
+  "forceGuidanceMessage": ""
+}
+```
 
-### Vehicles and friends
+## Requirements
 
-Use `/home` or `/spawn` while mounted and OMWH moves the root vehicle or mount with its full passenger group. This includes boats, minecarts, horses, other mounted entities, and player passengers.
+- Minecraft 26.2
+- Fabric Loader 0.19.3 or newer
+- Fabric API
+- Java 21 or newer
 
-Passenger groups are limited to 64 entities. Without `force`, OMWH refuses a destination that cannot fit the vehicle rather than separating riders or placing the group inside blocks.
+Install OMWH and Fabric API in the server's `mods` directory. The mod is server-side; clients do not need it.
 
-### Force commands
+## Building
 
-`/home force` and `/spawn force` are enabled by default. Any player who can use the parent command can use its force form.
+```bash
+./gradlew clean regressionTest build
+```
 
-Force skips only destination safety and vehicle-size checks. Cooldowns, missing homes, dimension routing, disabled spawn destinations, unavailable worlds, and teleport failures still apply. Server owners can turn force off globally, but OMWH has no permission nodes and cannot restrict force separately from the parent command.
-
-## Cooldowns
-
-Server owners can configure:
-
-- A regular cooldown after `/home` or `/spawn` moves the player or group
-- A PvP cooldown after a player takes damage from another player
-- A damage cooldown after a player takes other damage, including self-damage
-- A join cooldown after connecting to the server
-
-When cooldowns overlap, the longer event restriction wins. Cooldown state is kept in memory and clears when a player disconnects, so reconnecting also clears a PvP cooldown and replaces it with the configured join cooldown.
-
-Self-damage uses the normal damage cooldown, not the PvP cooldown.
-
-## Installation
-
-1. Install [Fabric Loader](https://fabricmc.net/use/) for Minecraft 26.2.
-2. Install [Fabric API](https://modrinth.com/mod/fabric-api) on the server.
-3. Remove any older OMWH jar from the server's `mods` folder, then put the new jar there. Keeping both versions causes Fabric Loader to stop on a duplicate mod ID.
-4. Start the server once to create `config/omwh.json`.
-
-Players do not need OMWH on their clients. OMWH also works in singleplayer.
-
-## Configuration
-
-Edit `config/omwh.json`, then restart the server. OMWH reads configuration only during startup and has no reload command.
-
-Existing files are not rewritten when new settings are added. Omitted fields use their built-in defaults. Known fields must use the documented JSON type and valid values; invalid known settings or malformed JSON stop startup rather than being silently replaced.
-
-See [CONFIGURATION.md](CONFIGURATION.md) for all settings, defaults, messages, color codes, placeholders, and validation rules. Detailed command and search behavior is documented in [FEATURES.md](FEATURES.md).
-
-## Server owners should know
-
-- OMWH has no permission nodes. All player sources can use the configured base commands.
-- Force is enabled for those players by default and can only be toggled globally.
-- Cross-dimension `/home` is enabled by default.
-- Nether, End, and modded-dimension spawn destinations are disabled by default.
-- Cooldowns and pending searches clear when a player disconnects.
-- Normal `/home` and `/spawn` may stay pending while OMWH prepares terrain and checks the destination.
+The dependency-free Java regression tasks are the canonical behavior suite.
 
 ## Links
 
+- [PyreHaven](https://pyrehaven.xyz)
 - [Download on Modrinth](https://modrinth.com/mod/omwh)
-- [Issues and suggestions](https://github.com/ff-tech-xyz/omwh/issues)
 - [PyreHaven Discord](https://discord.gg/tZ6Hx2ETA3)
+- [Source](https://github.com/ff-tech-xyz/omwh)
+- [Issues](https://github.com/ff-tech-xyz/omwh/issues)
 
 ## License
 
-[MIT](LICENSE)
-
-Made by PyreHaven. Find out more about us at [PyreHaven.xyz](https://pyrehaven.xyz).
+[CC0 1.0 Universal](LICENSE)

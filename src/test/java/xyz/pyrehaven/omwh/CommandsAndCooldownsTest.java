@@ -16,10 +16,12 @@ import java.util.UUID;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.LongFunction;
 
 public final class CommandsAndCooldownsTest {
     public static void main(String[] args) {
         cooldownPolicyUsesUuidExpiryAndPriority();
+        damageCallbacksRecordOnlyFinalAppliedOutcomes();
         disconnectCleanupAndSelfDamageClassification();
         forceSyntaxFollowsTheServerSetting();
         commandFeedbackUsesSpecificMessagesColorsAndPassengerDestination();
@@ -50,7 +52,7 @@ public final class CommandsAndCooldownsTest {
         Bootstrap.bootStrap();
         OmwhConfig enabled = new OmwhConfig();
         CommandDispatcher<CommandSourceStack> enabledDispatcher = new CommandDispatcher<>();
-        new Commands(enabled, new Cooldowns(enabled, () -> 0L)).register(enabledDispatcher);
+        new OmwhCommands(enabled, new Cooldowns(enabled, () -> 0L)).register(enabledDispatcher);
         check(enabledDispatcher.getRoot().getChild("home").getChild("force") != null,
                 "/home force registered by default");
         check(enabledDispatcher.getRoot().getChild("spawn").getChild("force") != null,
@@ -73,7 +75,7 @@ public final class CommandsAndCooldownsTest {
         OmwhConfig disabled = new OmwhConfig();
         disabled.enableForceOverride = false;
         CommandDispatcher<CommandSourceStack> disabledDispatcher = new CommandDispatcher<>();
-        new Commands(disabled, new Cooldowns(disabled, () -> 0L)).register(disabledDispatcher);
+        new OmwhCommands(disabled, new Cooldowns(disabled, () -> 0L)).register(disabledDispatcher);
         check(disabledDispatcher.getRoot().getChild("home").getChild("force") == null,
                 "disabled /home force syntax absent");
         check(disabledDispatcher.getRoot().getChild("spawn").getChild("force") == null,
@@ -88,10 +90,10 @@ public final class CommandsAndCooldownsTest {
 
         cooldowns.recordJoin(player);
         check(cooldowns.blocking(player).type() == Cooldowns.Type.JOIN, "join restriction");
-        cooldowns.recordIncomingDamageAllowedByOmwh(player, null);
+        cooldowns.afterDamage(player, null, 1.0f, false);
         check(cooldowns.blocking(player).type() == Cooldowns.Type.JOIN, "shorter event cannot reduce join");
         UUID attacker = UUID.randomUUID();
-        cooldowns.recordIncomingDamageAllowedByOmwh(player, attacker);
+        cooldowns.afterDamage(player, attacker, 1.0f, false);
         check(cooldowns.blocking(player).type() == Cooldowns.Type.PVP, "longest event wins");
         check(cooldowns.blocking(attacker).type() == Cooldowns.Type.PVP, "allowed PvP records attacker");
         cooldowns.recordRegular(player);
@@ -104,26 +106,68 @@ public final class CommandsAndCooldownsTest {
         config.damageCooldownSeconds = 0;
         config.joinCooldownSeconds = 0;
         config.enableRegularCooldown = false;
-        cooldowns.recordIncomingDamageAllowedByOmwh(player, UUID.randomUUID());
-        cooldowns.recordIncomingDamageAllowedByOmwh(player, null);
+        cooldowns.afterDamage(player, UUID.randomUUID(), 1.0f, false);
+        cooldowns.afterDamage(player, null, 1.0f, false);
         cooldowns.recordJoin(player);
         cooldowns.recordRegular(player);
         check(cooldowns.blocking(player).type() == Cooldowns.Type.NONE, "disabled and zero cooldowns");
 
         config.enableDamageCooldown = true;
         config.damageCooldownSeconds = 10;
-        cooldowns.recordIncomingDamageAllowedByOmwh(player, null);
+        cooldowns.afterDamage(player, null, 1.0f, false);
         now.addAndGet(1L);
         check(cooldowns.blocking(player).remainingSeconds() == 10, "remaining time rounds up");
         check(cooldowns.blocking(UUID.fromString(player.toString())).type() == Cooldowns.Type.DAMAGE,
                 "UUID state survives player replacement");
     }
 
+    private static void damageCallbacksRecordOnlyFinalAppliedOutcomes() {
+        OmwhConfig config = new OmwhConfig();
+        Cooldowns cooldowns = new Cooldowns(config, () -> 1_000L);
+        UUID victim = UUID.randomUUID();
+        UUID attacker = UUID.randomUUID();
+
+        cooldowns.afterDamage(victim, attacker, 4.0f, true);
+        check(cooldowns.blocking(victim).type() == Cooldowns.Type.NONE,
+                "shield-blocked damage starts no cooldown");
+        cooldowns.afterDamage(victim, attacker, 0.0f, false);
+        check(cooldowns.blocking(victim).type() == Cooldowns.Type.NONE,
+                "non-positive damage starts no cooldown");
+
+        cooldowns.afterDamage(victim, attacker, 4.0f, false);
+        check(cooldowns.blocking(victim).type() == Cooldowns.Type.PVP
+                        && cooldowns.blocking(attacker).type() == Cooldowns.Type.PVP,
+                "nonfatal applied PvP damage records both players through AFTER_DAMAGE");
+        cooldowns.remove(victim);
+        cooldowns.remove(attacker);
+
+        cooldowns.afterDeath(victim, attacker);
+        check(cooldowns.blocking(victim).type() == Cooldowns.Type.PVP
+                        && cooldowns.blocking(attacker).type() == Cooldowns.Type.PVP,
+                "fatal PvP damage records both players through AFTER_DEATH");
+        cooldowns.remove(victim);
+        cooldowns.remove(attacker);
+
+        config.enablePvpCooldown = false;
+        cooldowns.afterDamage(victim, attacker, 4.0f, false);
+        check(cooldowns.blocking(victim).type() == Cooldowns.Type.NONE
+                        && cooldowns.blocking(attacker).type() == Cooldowns.Type.NONE,
+                "disabled PvP cooldown does not fall back to ordinary damage");
+
+        cooldowns.afterDamage(victim, victim, 4.0f, false);
+        check(cooldowns.blocking(victim).type() == Cooldowns.Type.DAMAGE,
+                "nonfatal self-damage uses the ordinary damage cooldown");
+        cooldowns.remove(victim);
+        cooldowns.afterDeath(victim, victim);
+        check(cooldowns.blocking(victim).type() == Cooldowns.Type.DAMAGE,
+                "fatal self-damage uses the ordinary damage cooldown");
+    }
+
     private static void disconnectCleanupAndSelfDamageClassification() {
         OmwhConfig config = new OmwhConfig();
         Cooldowns cooldowns = new Cooldowns(config, () -> 1_000L);
         UUID player = UUID.randomUUID();
-        cooldowns.recordIncomingDamageAllowedByOmwh(player, player);
+        cooldowns.afterDamage(player, player, 1.0f, false);
         check(cooldowns.blocking(player).type() == Cooldowns.Type.DAMAGE,
                 "self-inflicted damage uses the ordinary damage cooldown");
         cooldowns.remove(player);
@@ -133,21 +177,23 @@ public final class CommandsAndCooldownsTest {
 
     private static void commandFeedbackUsesSpecificMessagesColorsAndPassengerDestination() {
         OmwhConfig config = new OmwhConfig();
-        check(Commands.renderMessage(config, config.pvpCooldownMessage,
-                        new Commands.MessageValues(null, null, null, 12, false))
+        check(OmwhCommands.renderMessage(config, config.pvpCooldownMessage,
+                        new OmwhCommands.MessageValues(null, null, null, 12, false))
                 .contains("12 seconds"), "cooldown placeholder");
         config.regularCooldownMessage = "&cWait {time}";
-        String rawCooldown = Commands.renderMessage(config, config.regularCooldownMessage,
-                new Commands.MessageValues(null, null, null, 3, false));
+        String rawCooldown = OmwhCommands.renderMessage(config, config.regularCooldownMessage,
+                new OmwhCommands.MessageValues(null, null, null, 3, false));
         check(rawCooldown.equals("&cWait 3"), "cooldown formatting is deferred to the send boundary");
-        check(Commands.format(rawCooldown).equals("§cWait 3"), "send boundary applies ampersand colors once");
+        check(OmwhCommands.format(rawCooldown).equals("§cWait 3"), "send boundary applies ampersand colors once");
+        check(OmwhCommands.format("Fish && Chips &aGreen").equals("Fish & Chips §aGreen"),
+                "double ampersands escape a literal while single ampersand color codes still translate");
         config.passengerNotificationMessage = "&e{player} took you to {destination}.";
-        check(Commands.renderMessage(config, config.passengerNotificationMessage,
-                        new Commands.MessageValues(null, "Alex", config.homePassengerDestination, null, false))
+        check(OmwhCommands.renderMessage(config, config.passengerNotificationMessage,
+                        new OmwhCommands.MessageValues(null, "Alex", config.homePassengerDestination, null, false))
                         .equals("&eAlex took you to their home."),
                 "home passenger notification is configurable");
-        check(Commands.renderMessage(config, config.passengerNotificationMessage,
-                        new Commands.MessageValues(null, "Alex", config.spawnPassengerDestination, null, false))
+        check(OmwhCommands.renderMessage(config, config.passengerNotificationMessage,
+                        new OmwhCommands.MessageValues(null, "Alex", config.spawnPassengerDestination, null, false))
                         .equals("&eAlex took you to spawn."),
                 "spawn passenger notification is configurable");
         config.homeCommand = "return";
@@ -155,48 +201,53 @@ public final class CommandsAndCooldownsTest {
         config.unsafeHomeMessage = "§cBlocked home.{forceGuidance}";
         config.unsafeSpawnMessage = "§cBlocked spawn.{forceGuidance}";
         config.forceGuidanceMessage = "\n§eUse /{command} force to teleport anyway.";
-        check(Commands.renderMessage(config, config.unsafeHomeMessage,
-                        new Commands.MessageValues(config.homeCommand, null, null, null, true))
+        check(OmwhCommands.renderMessage(config, config.unsafeHomeMessage,
+                        new OmwhCommands.MessageValues(config.homeCommand, null, null, null, true))
                         .equals("§cBlocked home.\n§eUse /return force to teleport anyway."),
                 "unsafe home advertises the configured force command");
-        check(Commands.renderMessage(config, config.unsafeSpawnMessage,
-                        new Commands.MessageValues(config.spawnCommand, null, null, null, true))
+        check(OmwhCommands.renderMessage(config, config.unsafeSpawnMessage,
+                        new OmwhCommands.MessageValues(config.spawnCommand, null, null, null, true))
                         .equals("§cBlocked spawn.\n§eUse /hub force to teleport anyway."),
                 "unsafe spawn advertises the configured force command");
-        check(Commands.renderMessage(config, config.unsafeHomeMessage,
-                        new Commands.MessageValues(config.homeCommand, null, null, null, false))
+        check(OmwhCommands.renderMessage(config, config.unsafeHomeMessage,
+                        new OmwhCommands.MessageValues(config.homeCommand, null, null, null, false))
                         .equals("§cBlocked home."),
                 "unsafe home does not advertise a disabled force command");
-        check(Commands.renderMessage(config, config.unsafeSpawnMessage,
-                        new Commands.MessageValues(config.spawnCommand, null, null, null, false))
+        check(OmwhCommands.renderMessage(config, config.unsafeSpawnMessage,
+                        new OmwhCommands.MessageValues(config.spawnCommand, null, null, null, false))
                         .equals("§cBlocked spawn."),
                 "unsafe spawn does not advertise a disabled force command");
-        check(Commands.renderMessageWithForceGuidance(config, "§cLegacy unsafe text.", config.homeCommand)
+        check(OmwhCommands.renderMessageWithForceGuidance(config, "§cLegacy unsafe text.", config.homeCommand)
                         .equals("§cLegacy unsafe text.\n§eUse /return force to teleport anyway."),
                 "existing unsafe messages without the placeholder retain force guidance");
-        check(Commands.renderMessage(config, config.vehicleTooLargeMessage,
-                        new Commands.MessageValues(config.homeCommand, null, null, null, true))
+        check(OmwhCommands.renderMessage(config, config.vehicleTooLargeMessage,
+                        new OmwhCommands.MessageValues(config.homeCommand, null, null, null, true))
                         .contains("/return force"),
                 "home vehicle-too-large feedback offers its configured force command");
-        check(Commands.renderMessage(config, config.vehicleTooLargeMessage,
-                        new Commands.MessageValues(config.spawnCommand, null, null, null, true))
+        check(OmwhCommands.renderMessage(config, config.vehicleTooLargeMessage,
+                        new OmwhCommands.MessageValues(config.spawnCommand, null, null, null, true))
                         .contains("/hub force"),
                 "spawn vehicle-too-large feedback offers its configured force command");
-        check(!Commands.renderMessage(config, config.vehicleTooLargeMessage,
-                        new Commands.MessageValues(config.homeCommand, null, null, null, false))
+        check(!OmwhCommands.renderMessage(config, config.vehicleTooLargeMessage,
+                        new OmwhCommands.MessageValues(config.homeCommand, null, null, null, false))
                         .contains("force"),
                 "vehicle-too-large feedback does not advertise disabled force");
         config.enableForceOverride = false;
-        check(Commands.renderMessageWithForceGuidance(config, "§cLegacy unsafe text.", config.homeCommand)
+        check(OmwhCommands.renderMessageWithForceGuidance(config, "§cLegacy unsafe text.", config.homeCommand)
                         .equals("§cLegacy unsafe text."),
                 "existing unsafe messages do not advertise disabled force");
         config.enableForceOverride = true;
+        config.forceGuidanceMessage = "";
+        check(OmwhCommands.renderMessageWithForceGuidance(config, "§cLegacy unsafe text.", config.homeCommand)
+                        .equals("§cLegacy unsafe text."),
+                "empty force guidance disables both placeholder and compatibility guidance");
+        config.forceGuidanceMessage = "\n§eUse /{command} force to teleport anyway.";
         check(config.passengerTreeTooLargeMessage.toLowerCase().contains("passenger")
                         && config.passengerTreeTooLargeMessage.toLowerCase().contains("large"),
                 "passenger cap denial has deliberate configurable feedback");
         config.homeSuccessMessage = "&a/{command} complete.";
-        check(Commands.renderMessage(config, config.homeSuccessMessage,
-                        new Commands.MessageValues(config.homeCommand, null, null, null, false))
+        check(OmwhCommands.renderMessage(config, config.homeSuccessMessage,
+                        new OmwhCommands.MessageValues(config.homeCommand, null, null, null, false))
                         .equals("&a/return complete."),
                 "success feedback is rendered from configuration");
     }
@@ -205,37 +256,44 @@ public final class CommandsAndCooldownsTest {
         OmwhConfig config = new OmwhConfig();
         var partial = new TeleportService.Result(TeleportService.Outcome.PARTIAL, java.util.List.of());
         var failed = new TeleportService.Result(TeleportService.Outcome.FAILED, java.util.List.of());
-        check(Commands.teleportFailureMessage(config, partial, "home")
-                        .equals("§eMinecraft started moving your group, but OMWH could not verify every passenger. Check your group before moving again."),
+        check(OmwhCommands.teleportFailureMessage(config, partial, "home")
+                        .equals("§eCheck your group — some passengers may not have made the trip."),
                 "post-movement verification failure gets clear player guidance");
-        check(Commands.continuesTeleportCompletion(partial),
+        check(OmwhCommands.continuesTeleportCompletion(partial),
                 "partial teleport continues through cooldown and passenger notifications");
-        check(Commands.teleportFailureMessage(config, failed, "home")
-                        .equals("§cInternal error executing /home. Check server log."),
+        check(OmwhCommands.teleportFailureMessage(config, failed, "home")
+                        .equals("§cSomething went wrong with /home. Please let a server admin know."),
                 "home teleport invariant failure gets command-specific internal error text");
-        check(Commands.teleportFailureMessage(config, failed, "spawn")
-                        .equals("§cInternal error executing /spawn. Check server log."),
+        check(OmwhCommands.teleportFailureMessage(config, failed, "spawn")
+                        .equals("§cSomething went wrong with /spawn. Please let a server admin know."),
                 "spawn teleport invariant failure gets command-specific internal error text");
-        check(!Commands.teleportFailureMessage(config, failed, "home").toLowerCase().contains("safe"),
+        check(!OmwhCommands.teleportFailureMessage(config, failed, "home").toLowerCase().contains("safe"),
                 "teleport invariant failure never exposes destination-safety wording");
-        check(!Commands.continuesTeleportCompletion(failed),
+        check(!OmwhCommands.continuesTeleportCompletion(failed),
                 "failed teleport stops before cooldown and passenger notifications");
     }
 
     private static void disabledSpawnFeedbackDoesNotClaimAWorldIsMissing() {
-        String message = new OmwhConfig().spawnDisabledMessage.toLowerCase();
+        OmwhConfig config = new OmwhConfig();
+        String unavailableHome = OmwhCommands.homeDenialMessage(
+                config, HomeDestination.Outcome.CURRENT_WORLD_UNAVAILABLE);
+        check(unavailableHome.equals(config.currentWorldUnavailableMessage),
+                "unavailable current world uses its dedicated home message");
+        check(!unavailableHome.toLowerCase().contains("force"),
+                "unavailable current world never advertises force");
+        String message = config.spawnDisabledMessage.toLowerCase();
         check(message.contains("disabled"), "disabled spawn has an explicit policy message");
         check(!message.contains("missing") && !message.contains("cannot determine"),
                 "disabled spawn is not reported as a missing world");
     }
 
     private static void pendingSpawnLifecycleRejectsDuplicatesAndCompletesExactlyOnce() {
-        Commands.PendingSearches<String, Integer> pending = new Commands.PendingSearches<>();
+        OmwhCommands.PendingSearches<String, Integer> pending = new OmwhCommands.PendingSearches<>();
         AtomicLong steps = new AtomicLong();
         List<Integer> completions = new ArrayList<>();
-        Commands.PendingWork<Integer> work = (candidateBudget, worldBudget) -> {
+        OmwhCommands.PendingWork<Integer> work = (candidateBudget, worldBudget) -> {
             long current = steps.incrementAndGet();
-            return current == 3 ? Commands.PendingStep.complete(7, 1, 1) : Commands.PendingStep.pending(1, 1);
+            return current == 3 ? OmwhCommands.PendingStep.complete(7, 1, 1) : OmwhCommands.PendingStep.pending(1, 1);
         };
         check(pending.add("player", work), "first /spawn search becomes pending");
         check(!pending.add("player", work), "duplicate /spawn cannot replace or double a pending search");
@@ -250,60 +308,60 @@ public final class CommandsAndCooldownsTest {
         check(completions.equals(List.of(7)) && pending.size() == 0,
                 "successful completion is delivered and removed exactly once");
         check(pending.add("failure", (candidateBudget, worldBudget) ->
-                        Commands.PendingStep.complete(-1, 1, 1)), "failed search completion added");
+                        OmwhCommands.PendingStep.complete(-1, 1, 1)), "failed search completion added");
         pending.tick(1, 1, completions::add);
         pending.tick(1, 1, completions::add);
         check(completions.equals(List.of(7, -1)) && pending.size() == 0,
                 "failed completion is delivered and removed exactly once");
 
         check(pending.add("disconnect", (candidateBudget, worldBudget) ->
-                Commands.PendingStep.pending(1, 1)), "disconnect search added");
-        pending.cancel("disconnect", new Commands.TickWorkAllowance(1));
+                OmwhCommands.PendingStep.pending(1, 1)), "disconnect search added");
+        pending.cancel("disconnect", new OmwhCommands.TickWorkAllowance(1));
         check(pending.size() == 0, "disconnect cleanup is bounded direct removal");
-        check(pending.add("a", (candidateBudget, worldBudget) -> Commands.PendingStep.pending(1, 1))
-                        && pending.add("b", (candidateBudget, worldBudget) -> Commands.PendingStep.pending(1, 1)),
+        check(pending.add("a", (candidateBudget, worldBudget) -> OmwhCommands.PendingStep.pending(1, 1))
+                        && pending.add("b", (candidateBudget, worldBudget) -> OmwhCommands.PendingStep.pending(1, 1)),
                 "stop-cleanup searches added");
         pending.clearTerminal();
         check(pending.size() == 0, "server-stop cleanup clears all pending searches");
     }
 
     private static void pendingWorkClosureCoversEveryTerminalExit() {
-        class ClosingWork implements Commands.PendingWork<String> {
+        class ClosingWork implements OmwhCommands.PendingWork<String> {
             private final boolean complete;
             private final AtomicInteger closes;
             ClosingWork(boolean complete, AtomicInteger closes) {
                 this.complete = complete;
                 this.closes = closes;
             }
-            @Override public Commands.PendingStep<String> step(int candidateBudget, int worldWorkBudget) {
-                return complete ? Commands.PendingStep.complete("done", 0, 0)
-                        : Commands.PendingStep.pending(1, 1);
+            @Override public OmwhCommands.PendingStep<String> step(int candidateBudget, int worldWorkBudget) {
+                return complete ? OmwhCommands.PendingStep.complete("done", 0, 0)
+                        : OmwhCommands.PendingStep.pending(1, 1);
             }
             @Override public void close() { closes.incrementAndGet(); }
         }
 
         AtomicInteger terminalCloses = new AtomicInteger();
-        Commands.PendingSearches<String, String> terminal = new Commands.PendingSearches<>();
+        OmwhCommands.PendingSearches<String, String> terminal = new OmwhCommands.PendingSearches<>();
         check(terminal.add("terminal", new ClosingWork(true, terminalCloses)), "terminal work added");
         terminal.tick(1, 1, value -> check(terminalCloses.get() == 0,
                 "completion callback runs while accepted destination tickets are still retained"));
         check(terminalCloses.get() == 1, "normal terminal completion closes after its callback");
 
         AtomicInteger removedCloses = new AtomicInteger();
-        Commands.PendingSearches<String, String> removed = new Commands.PendingSearches<>();
+        OmwhCommands.PendingSearches<String, String> removed = new OmwhCommands.PendingSearches<>();
         removed.add("home-or-force", new ClosingWork(false, removedCloses));
-        removed.cancel("home-or-force", new Commands.TickWorkAllowance(1));
+        removed.cancel("home-or-force", new OmwhCommands.TickWorkAllowance(1));
         check(removedCloses.get() == 1, "home, force, disconnect, and respawn removal closes pending work");
 
         AtomicInteger clearedCloses = new AtomicInteger();
-        Commands.PendingSearches<String, String> cleared = new Commands.PendingSearches<>();
+        OmwhCommands.PendingSearches<String, String> cleared = new OmwhCommands.PendingSearches<>();
         cleared.add("one", new ClosingWork(false, clearedCloses));
         cleared.add("two", new ClosingWork(false, clearedCloses));
         cleared.clearTerminal();
         check(clearedCloses.get() == 2, "server stop closes every pending request");
 
         AtomicInteger callbackFailureCloses = new AtomicInteger();
-        Commands.PendingSearches<String, String> callbackFailure = new Commands.PendingSearches<>();
+        OmwhCommands.PendingSearches<String, String> callbackFailure = new OmwhCommands.PendingSearches<>();
         callbackFailure.add("callback-failure", new ClosingWork(true, callbackFailureCloses));
         boolean threw = false;
         try {
@@ -316,13 +374,13 @@ public final class CommandsAndCooldownsTest {
     }
 
     private static void pendingCleanupIsAccountedAndRetried() {
-        class AccountedClose implements Commands.PendingWork<String> {
+        class AccountedClose implements OmwhCommands.PendingWork<String> {
             private final AtomicInteger closes = new AtomicInteger();
             private boolean failOnce;
             private boolean released;
             AccountedClose(boolean failOnce) { this.failOnce = failOnce; }
-            @Override public Commands.PendingStep<String> step(int candidateBudget, int worldWorkBudget) {
-                return Commands.PendingStep.complete("done", 1, 1);
+            @Override public OmwhCommands.PendingStep<String> step(int candidateBudget, int worldWorkBudget) {
+                return OmwhCommands.PendingStep.complete("done", 1, 1);
             }
             @Override public int closeWork() { return released ? 0 : 7; }
             @Override public void close() {
@@ -336,25 +394,25 @@ public final class CommandsAndCooldownsTest {
         }
 
         AccountedClose terminalWork = new AccountedClose(false);
-        Commands.PendingSearches<String, String> terminal = new Commands.PendingSearches<>();
+        OmwhCommands.PendingSearches<String, String> terminal = new OmwhCommands.PendingSearches<>();
         terminal.add("terminal", terminalWork);
-        Commands.PendingTick terminalUsed = terminal.tick(1, 8,
+        OmwhCommands.PendingTick terminalUsed = terminal.tick(1, 8,
                 value -> check(terminalWork.closes.get() == 0,
                         "accepted tickets remain through the completion callback"));
         check(terminalUsed.worldWorkUsed() == 8 && terminalWork.closes.get() == 1,
                 "terminal ticket removal is charged after completion dispatch");
 
         AccountedClose removedWork = new AccountedClose(false);
-        Commands.PendingSearches<String, String> removed = new Commands.PendingSearches<>();
+        OmwhCommands.PendingSearches<String, String> removed = new OmwhCommands.PendingSearches<>();
         removed.add("remove", removedWork);
-        Commands.TickWorkAllowance removalAllowance = new Commands.TickWorkAllowance(7);
+        OmwhCommands.TickWorkAllowance removalAllowance = new OmwhCommands.TickWorkAllowance(7);
         removed.cancel("remove", removalAllowance);
         check(removalAllowance.remaining() == 0 && removedWork.closes.get() == 1,
                 "direct cancellation reports its exact ticket-removal work");
 
         AccountedClose firstClear = new AccountedClose(false);
         AccountedClose secondClear = new AccountedClose(false);
-        Commands.PendingSearches<String, String> cleared = new Commands.PendingSearches<>();
+        OmwhCommands.PendingSearches<String, String> cleared = new OmwhCommands.PendingSearches<>();
         cleared.add("first", firstClear);
         cleared.add("second", secondClear);
         cleared.clearTerminal();
@@ -362,19 +420,19 @@ public final class CommandsAndCooldownsTest {
                 "server-stop cleanup reports every pending ticket removal");
 
         AccountedClose retryWork = new AccountedClose(true);
-        Commands.PendingSearches<String, String> retry = new Commands.PendingSearches<>();
+        OmwhCommands.PendingSearches<String, String> retry = new OmwhCommands.PendingSearches<>();
         retry.add("retry", retryWork);
-        Commands.PendingTick failedClose = retry.tick(1, 8, ignored -> { });
+        OmwhCommands.PendingTick failedClose = retry.tick(1, 8, ignored -> { });
         check(failedClose.worldWorkUsed() == 8 && retry.cleanupSize() == 1,
                 "failed ticket removal remains owned after its charged attempt");
-        Commands.PendingTick successfulRetry = retry.tick(1, 7, ignored -> { });
+        OmwhCommands.PendingTick successfulRetry = retry.tick(1, 7, ignored -> { });
         check(successfulRetry.worldWorkUsed() == 7 && retry.cleanupSize() == 0
                         && retryWork.closes.get() == 2,
                 "later scheduler tick charges and completes the retained cleanup retry");
     }
 
     private static void productionCancellationCallersOwnCleanupAccounting() {
-        class AccountedClose implements Commands.PendingWork<Void> {
+        class AccountedClose implements OmwhCommands.PendingWork<Void> {
             private final AtomicInteger closes = new AtomicInteger();
             private final int work;
             private boolean failOnce;
@@ -389,8 +447,8 @@ public final class CommandsAndCooldownsTest {
                 releaseAllowed = allowed;
                 return this;
             }
-            @Override public Commands.PendingStep<Void> step(int candidateBudget, int worldWorkBudget) {
-                return Commands.PendingStep.pending(1, 1);
+            @Override public OmwhCommands.PendingStep<Void> step(int candidateBudget, int worldWorkBudget) {
+                return OmwhCommands.PendingStep.pending(1, 1);
             }
             @Override public int closeWork() { return released ? 0 : work; }
             @Override public void close() {
@@ -404,71 +462,71 @@ public final class CommandsAndCooldownsTest {
             }
         }
 
-        java.util.function.Function<Integer, Commands> commandsWithBudget = limit -> {
+        java.util.function.Function<Integer, OmwhCommands> commandsWithBudget = limit -> {
             OmwhConfig config = new OmwhConfig();
-            return new Commands(config, new Cooldowns(config, () -> 1_000L), limit);
+            return new OmwhCommands(config, new Cooldowns(config, () -> 1_000L), limit);
         };
 
-        Commands home = commandsWithBudget.apply(7);
+        OmwhCommands home = commandsWithBudget.apply(7);
         AccountedClose homeWork = new AccountedClose(false)
                 .releaseOnlyWhen(() -> home.remainingServerWork() == 0);
         UUID homePlayer = UUID.randomUUID();
         check(home.enqueuePending(homePlayer, homeWork), "/home cancellation fixture enqueued");
-        home.cancelPendingForHome(homePlayer);
+        home.cancelPending(homePlayer);
         check(homeWork.closes.get() == 1 && home.remainingServerWork() == 0,
                 "/home claims exact cleanup work before releasing pending terrain");
 
-        Commands forcedSpawn = commandsWithBudget.apply(7);
+        OmwhCommands forcedSpawn = commandsWithBudget.apply(7);
         AccountedClose forcedWork = new AccountedClose(false)
                 .releaseOnlyWhen(() -> forcedSpawn.remainingServerWork() == 0);
         UUID forcedPlayer = UUID.randomUUID();
         check(forcedSpawn.enqueuePending(forcedPlayer, forcedWork), "forced /spawn cancellation fixture enqueued");
-        forcedSpawn.cancelPendingForForcedSpawn(forcedPlayer);
+        forcedSpawn.cancelPending(forcedPlayer);
         check(forcedWork.closes.get() == 1 && forcedSpawn.remainingServerWork() == 0,
                 "forced /spawn claims exact cleanup work before continuing its route");
 
         OmwhConfig routeConfig = new OmwhConfig();
-        Commands routeBudget = new Commands(routeConfig,
+        OmwhCommands routeBudget = new OmwhCommands(routeConfig,
                 new Cooldowns(routeConfig, () -> 1_000L));
         AccountedClose maximumCancellation = new AccountedClose(false,
-                Commands.MAX_PENDING_TICKET_RELEASE_WORK);
+                OmwhCommands.MAX_PENDING_TICKET_RELEASE_WORK);
         UUID routePlayer = UUID.randomUUID();
         check(routeBudget.enqueuePending(routePlayer, maximumCancellation),
                 "maximum forced-route cancellation fixture enqueued");
-        routeBudget.cancelPendingForForcedSpawn(routePlayer);
+        routeBudget.cancelPending(routePlayer);
         check(routeBudget.remainingServerWork()
-                        >= TeleportService.LIFECYCLE_CAPTURE_WORK + Commands.MAX_IMMEDIATE_ROUTE_WORK,
+                        >= TeleportService.LIFECYCLE_CAPTURE_WORK + OmwhCommands.MAX_IMMEDIATE_ROUTE_WORK,
                 "maximum ticket cleanup leaves the promised forced route inside the same shared allowance");
 
-        Commands disconnect = commandsWithBudget.apply(7);
+        OmwhCommands disconnect = commandsWithBudget.apply(7);
         AccountedClose disconnectWork = new AccountedClose(false)
                 .releaseOnlyWhen(() -> disconnect.remainingServerWork() == 0);
         UUID disconnectedPlayer = UUID.randomUUID();
         check(disconnect.enqueuePending(disconnectedPlayer, disconnectWork), "disconnect fixture enqueued");
-        disconnect.removePending(disconnectedPlayer);
+        disconnect.cancelPending(disconnectedPlayer);
         check(disconnectWork.closes.get() == 1 && disconnect.remainingServerWork() == 0,
-                "disconnect cleanup is charged through the Commands allowance");
+                "disconnect cleanup is charged through the OmwhCommands allowance");
 
-        Commands respawn = commandsWithBudget.apply(7);
+        OmwhCommands respawn = commandsWithBudget.apply(7);
         AccountedClose respawnWork = new AccountedClose(false)
                 .releaseOnlyWhen(() -> respawn.remainingServerWork() == 0);
         UUID respawnedPlayer = UUID.randomUUID();
         check(respawn.enqueuePending(respawnedPlayer, respawnWork), "respawn fixture enqueued");
-        respawn.respawnPending(respawnedPlayer);
+        respawn.cancelPending(respawnedPlayer);
         check(respawnWork.closes.get() == 1 && respawn.remainingServerWork() == 0,
-                "respawn cleanup is charged through the Commands allowance");
+                "respawn cleanup is charged through the OmwhCommands allowance");
 
-        Commands deferred = commandsWithBudget.apply(7);
+        OmwhCommands deferred = commandsWithBudget.apply(7);
         AccountedClose priorWork = new AccountedClose(false, 1)
                 .releaseOnlyWhen(() -> deferred.remainingServerWork() == 6);
         UUID priorPlayer = UUID.randomUUID();
         check(deferred.enqueuePending(priorPlayer, priorWork), "prior cleanup fixture enqueued");
-        deferred.removePending(priorPlayer);
+        deferred.cancelPending(priorPlayer);
         AccountedClose deferredWork = new AccountedClose(false)
                 .releaseOnlyWhen(() -> deferred.remainingServerWork() == 0);
         UUID deferredPlayer = UUID.randomUUID();
         check(deferred.enqueuePending(deferredPlayer, deferredWork), "deferred cleanup fixture enqueued");
-        deferred.cancelPendingForHome(deferredPlayer);
+        deferred.cancelPending(deferredPlayer);
         check(deferredWork.closes.get() == 0,
                 "live cancellation transfers cleanup when its exact work cannot be claimed");
         deferred.tick();
@@ -478,7 +536,7 @@ public final class CommandsAndCooldownsTest {
         check(deferredWork.closes.get() == 1,
                 "a later shared-budget tick claims transferred cleanup before releasing it");
 
-        Commands stopped = commandsWithBudget.apply(0);
+        OmwhCommands stopped = commandsWithBudget.apply(0);
         AccountedClose stoppedFirst = new AccountedClose(true);
         AccountedClose stoppedSecond = new AccountedClose(false);
         check(stopped.enqueuePending(UUID.randomUUID(), stoppedFirst)
@@ -501,20 +559,23 @@ public final class CommandsAndCooldownsTest {
                         releases.incrementAndGet();
                     }
                 });
-        SpawnDestination.Pending pending = SpawnDestination.Pending.controlledPreparing(
-                SpawnDestination.offsets(0, 0).iterator(), false, preparation,
+        SpawnDestination.SearchStage search = new SpawnDestination.PreparedSearchStage(
+                SpawnDestination.offsets(0).iterator(), false, preparation,
                 ignored -> new SpawnDestination.CandidateProbe() {
                     @Override public void begin(SpawnDestination.Offset offset, SpawnDestination.ProbeKind kind) { }
                     @Override public SpawnDestination.ProbeStep step(int availableWorldWork) {
                         return new SpawnDestination.ProbeStep(SpawnDestination.ProbeOutcome.REJECTED, 1);
                     }
-                }, BlockPos.ZERO, 1,
-                feet -> { throw new AssertionError("unsafe search must not start final preparation"); });
+                }, BlockPos.ZERO, 1);
+        SpawnDestination.Pending pending = new SpawnDestination.Pending(search,
+                new SpawnDestination.DirectFinalStage(
+                        feet -> { throw new AssertionError("unsafe search must not start final preparation"); }),
+                null, BlockPos.ZERO, BlockPos.ZERO, 1, 0, 0);
 
-        Commands.PendingWork<SpawnDestination.Result> route = Commands.pendingSpawnRoute(pending);
+        OmwhCommands.PendingWork<SpawnDestination.Result> route = OmwhCommands.pendingSpawnRoute(pending);
 
         OmwhConfig config = new OmwhConfig();
-        Commands commands = new Commands(config, new Cooldowns(config, () -> 1_000L));
+        OmwhCommands commands = new OmwhCommands(config, new Cooldowns(config, () -> 1_000L));
         List<SpawnDestination.Result> completions = new ArrayList<>();
         UUID player = UUID.randomUUID();
         check(commands.enqueuePending(player, commands.createPendingCoordinator(
@@ -524,11 +585,11 @@ public final class CommandsAndCooldownsTest {
                         value -> true,
                         completions::add,
                         status -> { throw new AssertionError("current lifecycle cannot reject"); })),
-                "real /spawn pending route enqueued through Commands");
+                "real /spawn pending route enqueued through OmwhCommands");
 
         commands.tick();
         check(retained.size() == 1 && releases.get() == 0 && completions.isEmpty(),
-                "terrain tickets transfer to the pending Commands owner between ticks");
+                "terrain tickets transfer to the pending OmwhCommands owner between ticks");
         commands.tick();
         check(retained.size() == 1 && releases.get() == 0 && completions.isEmpty(),
                 "terrain tickets remain owned while the prepared search is still pending");
@@ -544,7 +605,7 @@ public final class CommandsAndCooldownsTest {
             final AtomicInteger releases = new AtomicInteger();
             final AtomicInteger releaseAttempts = new AtomicInteger();
             final Set<Long> retained = new HashSet<>();
-            final Commands.PendingWork<HomeDestination.Result> work;
+            final OmwhCommands.PendingWork<HomeDestination.Result> work;
 
             HomeRoute(HomeDestination.Outcome resolutionOutcome, int candidateChunks, boolean failFirstRelease) {
                 this(resolutionOutcome, candidateChunks, failFirstRelease, false);
@@ -564,70 +625,38 @@ public final class CommandsAndCooldownsTest {
                             }
                         });
                 HomeDestination.SavedHome home = new HomeDestination.SavedHome(
-                        null, null, null, BlockPos.ZERO, false);
+                        null, null, null, BlockPos.ZERO, false, null);
                 HomeDestination.HomeAccess access = new HomeDestination.HomeAccess() {
                     @Override public HomeDestination.Validation validate() { throw new AssertionError("already validated"); }
+                    @Override public HomeDestination.RespawnAuthority currentAuthority(
+                            HomeDestination.SavedHome saved) { return saved.authority(); }
                     @Override public HomeDestination.PreparedSavedHome prepare(HomeDestination.SavedHome saved) {
                         return new HomeDestination.PreparedSavedHome(saved);
                     }
+                    @Override public List<HomeDestination.TerrainRead> resolutionTerrain(
+                            HomeDestination.SavedHome saved) { return List.of(); }
                     @Override public HomeDestination.Resolution resolve(HomeDestination.PreparedSavedHome prepared) {
                         return resolutionOutcome == HomeDestination.Outcome.ACCEPT
                                 ? new HomeDestination.Resolution(HomeDestination.Outcome.ACCEPT,
                                 new HomeDestination.ResolvedHome(prepared, null, null))
                                 : new HomeDestination.Resolution(resolutionOutcome, null);
                     }
-                    @Override public HomeDestination.Result evaluate(
-                            HomeDestination.ResolvedHome resolved, boolean requestedForce) {
-                        check(requestedForce == force, "concrete home route preserves force through preparation");
-                        return new HomeDestination.Result(HomeDestination.Outcome.ACCEPT, null);
-                    }
                 };
                 List<HomeDestination.TerrainRead> reads = new ArrayList<>();
                 for (int chunk = 0; chunk < candidateChunks; chunk++) {
                     reads.add(new HomeDestination.TerrainRead(chunk * 16, chunk * 16, 0, 0));
                 }
-                HomeDestination.Pending pending = HomeDestination.Pending.controlled(
-                        force, access, home, preparation, reads.iterator());
-                work = Commands.pendingHomeRoute(pending);
+                HomeDestination.Pending pending = new HomeDestination.Pending(force, access, home, preparation);
+                work = OmwhCommands.pendingHomeRoute(pending);
             }
         }
 
-        java.util.function.Supplier<Commands> commands = () -> {
+        java.util.function.Supplier<OmwhCommands> commands = () -> {
             OmwhConfig config = new OmwhConfig();
-            return new Commands(config, new Cooldowns(config, () -> 1_000L));
+            return new OmwhCommands(config, new Cooldowns(config, () -> 1_000L));
         };
 
-        Commands acceptedCommands = commands.get();
-        HomeRoute accepted = new HomeRoute(HomeDestination.Outcome.ACCEPT, 1, false);
-        AtomicInteger acceptedCompletions = new AtomicInteger();
-        UUID acceptedPlayer = UUID.randomUUID();
-        check(acceptedCommands.enqueuePending(acceptedPlayer, acceptedCommands.createPendingCoordinator(
-                        accepted.work, () -> TeleportService.LifecycleStatus.CURRENT,
-                        value -> true, value -> true,
-                        value -> {
-                            check(accepted.releases.get() == 0,
-                                    "accepted /home completion runs while terrain remains retained");
-                            acceptedCompletions.incrementAndGet();
-                        }, status -> { throw new AssertionError("current lifecycle"); })),
-                "accepted concrete home route enqueued");
-        acceptedCommands.tick();
-        check(acceptedCompletions.get() == 1 && accepted.releases.get() == 1 && accepted.retained.isEmpty(),
-                "accepted /home releases its exact terrain once after completion");
-
-        Commands forcedCommands = commands.get();
-        HomeRoute forced = new HomeRoute(HomeDestination.Outcome.ACCEPT, 1, false, true);
-        AtomicInteger forcedCompletions = new AtomicInteger();
-        check(forcedCommands.enqueuePending(UUID.randomUUID(), forcedCommands.createPendingCoordinator(
-                        forced.work, () -> TeleportService.LifecycleStatus.CURRENT,
-                        value -> true, value -> true,
-                        value -> forcedCompletions.incrementAndGet(),
-                        status -> { throw new AssertionError("current lifecycle"); })),
-                "forced concrete home route enqueued through the shared pending owner");
-        forcedCommands.tick();
-        check(forcedCompletions.get() == 1 && forced.releases.get() == 1 && forced.retained.isEmpty(),
-                "forced /home still prepares and releases its exact vanilla-resolution terrain");
-
-        Commands deniedCommands = commands.get();
+        OmwhCommands deniedCommands = commands.get();
         HomeRoute denied = new HomeRoute(HomeDestination.Outcome.NO_HOME, 1, false);
         AtomicInteger deniedCompletions = new AtomicInteger();
         check(deniedCommands.enqueuePending(UUID.randomUUID(), deniedCommands.createPendingCoordinator(
@@ -640,15 +669,13 @@ public final class CommandsAndCooldownsTest {
                         }, status -> { throw new AssertionError("current lifecycle"); })),
                 "denied concrete home route enqueued");
         deniedCommands.tick();
+        deniedCommands.tick();
         check(deniedCompletions.get() == 1 && denied.releases.get() == 1 && denied.retained.isEmpty(),
                 "denied/invalid /home releases retained terrain exactly once");
 
-        java.util.function.BiConsumer<Commands, UUID> homeCancel = Commands::cancelPendingForHome;
-        java.util.function.BiConsumer<Commands, UUID> forceCancel = Commands::cancelPendingForForcedSpawn;
-        java.util.function.BiConsumer<Commands, UUID> disconnect = Commands::removePending;
-        java.util.function.BiConsumer<Commands, UUID> respawn = Commands::respawnPending;
-        for (var cancellation : List.of(homeCancel, forceCancel, disconnect, respawn)) {
-            Commands owner = commands.get();
+        java.util.function.BiConsumer<OmwhCommands, UUID> cancellation = OmwhCommands::cancelPending;
+        for (var cancel : List.of(cancellation)) {
+            OmwhCommands owner = commands.get();
             HomeRoute pendingHome = new HomeRoute(HomeDestination.Outcome.ACCEPT, 3, false);
             UUID player = UUID.randomUUID();
             check(owner.enqueuePending(player, owner.createPendingCoordinator(
@@ -660,12 +687,12 @@ public final class CommandsAndCooldownsTest {
             owner.tick();
             check(pendingHome.retained.size() == 1,
                     "one concrete home chunk is retained before lifecycle cancellation");
-            cancellation.accept(owner, player);
+            cancel.accept(owner, player);
             check(pendingHome.releases.get() == 1 && pendingHome.retained.isEmpty(),
-                    "/home, forced /spawn, disconnect, and respawn each release concrete home terrain once");
+                    "shared cancellation path releases concrete home terrain once");
         }
 
-        Commands stopped = commands.get();
+        OmwhCommands stopped = commands.get();
         HomeRoute stopping = new HomeRoute(HomeDestination.Outcome.ACCEPT, 3, true);
         UUID stoppingPlayer = UUID.randomUUID();
         check(stopped.enqueuePending(stoppingPlayer, stopped.createPendingCoordinator(
@@ -720,24 +747,23 @@ public final class CommandsAndCooldownsTest {
                 @Override public HomeDestination.PreparedSavedHome prepare(HomeDestination.SavedHome saved) {
                     return new HomeDestination.PreparedSavedHome(saved);
                 }
+                @Override public List<HomeDestination.TerrainRead> resolutionTerrain(
+                        HomeDestination.SavedHome saved) {
+                    return List.of(new HomeDestination.TerrainRead(0, 0, 0, 0),
+                            new HomeDestination.TerrainRead(16, 16, 0, 0));
+                }
                 @Override public HomeDestination.Resolution resolve(HomeDestination.PreparedSavedHome prepared) {
                     resolutions.incrementAndGet();
                     return new HomeDestination.Resolution(HomeDestination.Outcome.ACCEPT,
                             new HomeDestination.ResolvedHome(prepared, null, null));
                 }
-                @Override public HomeDestination.Result evaluate(
-                        HomeDestination.ResolvedHome resolved, boolean force) {
-                    throw new AssertionError("stale home cannot reach safety");
-                }
             };
-            HomeDestination.Pending pending = HomeDestination.Pending.controlled(false, access, home, preparation,
-                    List.of(new HomeDestination.TerrainRead(0, 0, 0, 0),
-                            new HomeDestination.TerrainRead(16, 16, 0, 0)).iterator());
+            HomeDestination.Pending pending = new HomeDestination.Pending(false, access, home, preparation);
             OmwhConfig config = new OmwhConfig();
-            Commands commands = new Commands(config, new Cooldowns(config, () -> 1_000L));
+            OmwhCommands commands = new OmwhCommands(config, new Cooldowns(config, () -> 1_000L));
             UUID player = UUID.randomUUID();
             check(commands.enqueuePending(player, commands.createPendingCoordinator(
-                            Commands.pendingHomeRoute(pending),
+                            OmwhCommands.pendingHomeRoute(pending),
                             () -> TeleportService.LifecycleStatus.CURRENT,
                             value -> true,
                             value -> {
@@ -764,16 +790,16 @@ public final class CommandsAndCooldownsTest {
     private static void pendingGenerationFailureRetiresAndReleasesExactlyOnce() {
         AtomicInteger failures = new AtomicInteger();
         AtomicInteger closes = new AtomicInteger();
-        Commands.PendingWork<Void> guarded = Commands.guardPending(new Commands.PendingWork<Void>() {
-            @Override public Commands.PendingStep<Void> step(int candidateBudget, int worldWorkBudget) {
+        OmwhCommands.PendingWork<Void> guarded = OmwhCommands.guardPending(new OmwhCommands.PendingWork<Void>() {
+            @Override public OmwhCommands.PendingStep<Void> step(int candidateBudget, int worldWorkBudget) {
                 throw new IllegalStateException("generation failed");
             }
             @Override public void close() { closes.incrementAndGet(); }
         }, failure -> failures.incrementAndGet());
 
-        Commands.PendingSearches<String, Void> pending = new Commands.PendingSearches<>();
+        OmwhCommands.PendingSearches<String, Void> pending = new OmwhCommands.PendingSearches<>();
         check(pending.add("generation", guarded), "guarded production failure path added");
-        Commands.PendingTick used = pending.tick(1, 11, ignored -> { });
+        OmwhCommands.PendingTick used = pending.tick(1, 11, ignored -> { });
         check(used.itemsCompleted() == 1 && used.candidatesUsed() == 1 && used.worldWorkUsed() == 11,
                 "generation failure retires while conservatively charging its complete assigned slice");
         check(failures.get() == 1 && closes.get() == 1 && pending.size() == 0,
@@ -781,7 +807,7 @@ public final class CommandsAndCooldownsTest {
     }
 
     private static void pendingSpawnSchedulingSharesOneFairServerWideBudget() {
-        Commands.PendingSearches<Integer, Integer> pending = new Commands.PendingSearches<>();
+        OmwhCommands.PendingSearches<Integer, Integer> pending = new OmwhCommands.PendingSearches<>();
         int players = 100;
         int[] progress = new int[players];
         for (int player = 0; player < players; player++) {
@@ -789,14 +815,14 @@ public final class CommandsAndCooldownsTest {
             check(pending.add(id, (candidateBudget, worldBudget) -> {
                 check(candidateBudget > 0 && worldBudget > 0, "scheduler supplies positive slices");
                 progress[id]++;
-                return Commands.PendingStep.pending(1, 1);
+                return OmwhCommands.PendingStep.pending(1, 1);
             }), "fair-search fixture added");
         }
 
-        Commands.PendingTick first = pending.tick(Commands.SEARCH_CANDIDATES_PER_TICK,
-                Commands.SEARCH_WORLD_WORK_PER_TICK, ignored -> { });
-        check(first.candidatesUsed() <= Commands.SEARCH_CANDIDATES_PER_TICK
-                        && first.worldWorkUsed() <= Commands.SEARCH_WORLD_WORK_PER_TICK,
+        OmwhCommands.PendingTick first = pending.tick(OmwhCommands.SEARCH_CANDIDATES_PER_TICK,
+                OmwhCommands.SEARCH_WORLD_WORK_PER_TICK, ignored -> { });
+        check(first.candidatesUsed() <= OmwhCommands.SEARCH_CANDIDATES_PER_TICK
+                        && first.worldWorkUsed() <= OmwhCommands.SEARCH_WORLD_WORK_PER_TICK,
                 "all players share one aggregate server-wide allowance");
         for (int player = 0; player < players; player++) {
             check(progress[player] == 1,
@@ -804,7 +830,7 @@ public final class CommandsAndCooldownsTest {
         }
 
         int[] before = progress.clone();
-        Commands.PendingTick second = pending.tick(50, 50, ignored -> { });
+        OmwhCommands.PendingTick second = pending.tick(50, 50, ignored -> { });
         check(second.candidatesUsed() == 50 && second.worldWorkUsed() == 50,
                 "smaller aggregate allowance is consumed exactly once across the queue");
         int advanced = 0;
@@ -813,18 +839,18 @@ public final class CommandsAndCooldownsTest {
     }
 
     private static void preparationProgressYieldsAfterOneQuantumPerSchedulerTick() {
-        Commands.PendingSearches<String, Void> pending = new Commands.PendingSearches<>();
+        OmwhCommands.PendingSearches<String, Void> pending = new OmwhCommands.PendingSearches<>();
         AtomicInteger firstVisits = new AtomicInteger();
         AtomicInteger secondVisits = new AtomicInteger();
         check(pending.add("first", (candidateBudget, worldBudget) -> {
                     firstVisits.incrementAndGet();
-                    return Commands.PendingStep.pending(0, SpawnDestination.PREPARATION_CHUNKS_PER_VISIT);
+                    return OmwhCommands.PendingStep.pending(0, SpawnDestination.PREPARATION_CHUNKS_PER_VISIT);
                 }) && pending.add("second", (candidateBudget, worldBudget) -> {
                     secondVisits.incrementAndGet();
-                    return Commands.PendingStep.pending(0, SpawnDestination.PREPARATION_CHUNKS_PER_VISIT);
+                    return OmwhCommands.PendingStep.pending(0, SpawnDestination.PREPARATION_CHUNKS_PER_VISIT);
                 }), "preparing routes added to the production scheduler");
 
-        Commands.PendingTick used = pending.tick(Commands.SEARCH_CANDIDATES_PER_TICK, 100, ignored -> { });
+        OmwhCommands.PendingTick used = pending.tick(OmwhCommands.SEARCH_CANDIDATES_PER_TICK, 100, ignored -> { });
         check(firstVisits.get() == 1 && secondVisits.get() == 1,
                 "each preparing route receives one fixed chunk quantum per server tick");
         check(used.candidatesUsed() == 0
@@ -834,42 +860,44 @@ public final class CommandsAndCooldownsTest {
 
     private static void productionPendingSchedulerSlicesRevalidationAndRetiresStaleWork() {
         Object chunk = new Object();
-        DestinationSafety.ChunkResidency resident = DestinationSafety.ChunkResidency.captureValues(
+        DestinationSafety.ChunkResidency resident = testResidencyValues(
                 -16, 16, -16, 16, ignored -> chunk);
         java.util.function.Function<BlockPos, net.minecraft.world.level.block.state.BlockState> safeStates =
                 position -> position.getY() == -1 ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState();
         SpawnDestination.Search search = new SpawnDestination.Search(
-                SpawnDestination.offsets(0, 0).iterator(),
-                DestinationSafety.SpawnProbe.controlled(
+                SpawnDestination.offsets(0).iterator(),
+                DestinationsTest.spawnProbe(
                         BlockPos.ZERO, 14, 16, resident, safeStates), false);
-        SpawnDestination.Pending route = SpawnDestination.Pending.controlled(
-                search, BlockPos.ZERO, 14,
-                feet -> DestinationSafety.SpawnProbe.controlled(feet, 14, 16, resident, safeStates));
+        SpawnDestination.Pending route = new SpawnDestination.Pending(
+                new SpawnDestination.DirectSearchStage(search),
+                new SpawnDestination.DirectFinalStage(
+                        feet -> DestinationsTest.spawnProbe(feet, 14, 16, resident, safeStates)),
+                null, BlockPos.ZERO, BlockPos.ZERO, 14, 0, 0);
 
-        Commands.PendingSearches<String, SpawnDestination.Result> pending = new Commands.PendingSearches<>();
+        OmwhCommands.PendingSearches<String, SpawnDestination.Result> pending = new OmwhCommands.PendingSearches<>();
         for (int stale = 0; stale < 3; stale++) {
             check(pending.add("stale-" + stale, (candidateBudget, worldBudget) ->
-                    Commands.PendingStep.complete(new SpawnDestination.Result(
+                    OmwhCommands.PendingStep.complete(new SpawnDestination.Result(
                             SpawnDestination.Outcome.UNSAFE, null), 0, 0)), "stale completion added");
         }
         check(pending.add("valid", (candidateBudget, worldBudget) -> {
             SpawnDestination.Tick used = route.tick(candidateBudget, worldBudget);
             return route.complete()
-                    ? Commands.PendingStep.complete(route.result(), used.candidatesStarted(), used.worldWork())
-                    : Commands.PendingStep.pending(used.candidatesStarted(), used.worldWork());
+                    ? OmwhCommands.PendingStep.complete(route.result(), used.candidatesStarted(), used.worldWork())
+                    : OmwhCommands.PendingStep.pending(used.candidatesStarted(), used.worldWork());
         }), "production pending route added behind stale completions");
 
         List<SpawnDestination.Result> completions = new ArrayList<>();
 
         long totalWorldWork = 0;
         int schedulerTicks = 0;
-        Commands.PendingTick first = null;
+        OmwhCommands.PendingTick first = null;
         while (pending.size() > 0) {
-            Commands.PendingTick used = pending.tick(Commands.SEARCH_CANDIDATES_PER_TICK,
-                    Commands.PENDING_ADVANCEMENT_WORK_PER_TICK, completions::add);
+            OmwhCommands.PendingTick used = pending.tick(OmwhCommands.SEARCH_CANDIDATES_PER_TICK,
+                    OmwhCommands.PENDING_ADVANCEMENT_WORK_PER_TICK, completions::add);
             if (first == null) first = used;
-            check(used.candidatesUsed() <= Commands.SEARCH_CANDIDATES_PER_TICK
-                            && used.worldWorkUsed() <= Commands.SEARCH_WORLD_WORK_PER_TICK,
+            check(used.candidatesUsed() <= OmwhCommands.SEARCH_CANDIDATES_PER_TICK
+                            && used.worldWorkUsed() <= OmwhCommands.SEARCH_WORLD_WORK_PER_TICK,
                     "actual PendingSearches layer bounds aggregate production work every tick");
             totalWorldWork += used.worldWorkUsed();
             schedulerTicks++;
@@ -878,12 +906,6 @@ public final class CommandsAndCooldownsTest {
 
         check(first != null && first.itemsCompleted() >= 3 && first.worldWorkUsed() > 0,
                 "multiple zero-work stale completions retire before later valid work advances in the same tick");
-        Commands.PendingStep<String> failed = Commands.failedPendingStep("failed", 7, 11);
-        check(failed.complete() && failed.candidatesUsed() == 7 && failed.worldWorkUsed() == 11,
-                "pending exceptions conservatively consume their full assigned slice");
-        check(!Commands.shouldLoadDestinationChunks(true)
-                        && Commands.shouldLoadDestinationChunks(false),
-                "incremental spawn skips broad chunk generation while immediate routes retain preparation");
         long revalidationWorldWork = totalWorldWork - 46_372;
         check(revalidationWorldWork == 46_372,
                 "maximum live revalidation charges safety work without inventing a second chunk capture");
@@ -902,33 +924,33 @@ public final class CommandsAndCooldownsTest {
 
     private static void commandsTickPassesASeparatePendingAdvancementSlice() {
         OmwhConfig config = new OmwhConfig();
-        Commands commands = new Commands(config, new Cooldowns(config, () -> 1_000L));
+        OmwhCommands commands = new OmwhCommands(config, new Cooldowns(config, () -> 1_000L));
         AtomicInteger suppliedWork = new AtomicInteger();
         check(commands.enqueuePending(UUID.randomUUID(), (candidateBudget, worldBudget) -> {
                     suppliedWork.set(worldBudget);
-                    return Commands.PendingStep.pending(1, worldBudget);
+                    return OmwhCommands.PendingStep.pending(1, worldBudget);
                 }), "pending advancement probe enqueued");
         commands.tick();
-        check(suppliedWork.get() == Commands.PENDING_ADVANCEMENT_WORK_PER_TICK,
-                "Commands.tick passes the separately derived pending advancement slice");
-        check(Commands.PENDING_ADVANCEMENT_WORK_PER_TICK < Commands.SEARCH_WORLD_WORK_PER_TICK,
+        check(suppliedWork.get() == OmwhCommands.PENDING_ADVANCEMENT_WORK_PER_TICK,
+                "OmwhCommands.tick passes the separately derived pending advancement slice");
+        check(OmwhCommands.PENDING_ADVANCEMENT_WORK_PER_TICK < OmwhCommands.SEARCH_WORLD_WORK_PER_TICK,
                 "pending advancement is strictly smaller than the aggregate immediate-plus-pending allowance");
-        check(Commands.PENDING_ADVANCEMENT_WORK_PER_TICK
+        check(OmwhCommands.PENDING_ADVANCEMENT_WORK_PER_TICK
                         == TeleportService.LIFECYCLE_VALIDATION_WORK
-                        + Commands.PENDING_ROUTE_WORK_SLICE
-                        + Commands.MAX_EFFECT_DISPATCHES
+                        + OmwhCommands.PENDING_ROUTE_WORK_SLICE
+                        + OmwhCommands.MAX_EFFECT_DISPATCHES
                         + TeleportService.COMPLETION_WORK
-                        + Commands.MAX_PENDING_TICKET_RELEASE_WORK,
+                        + OmwhCommands.MAX_PENDING_TICKET_RELEASE_WORK,
                 "pending slice reserves lifecycle, route, effects, completion, and ticket cleanup");
     }
 
     private static void productionCoordinatorOwnsLifecycleFinalGatesAndDispatch() {
         List<String> order = new ArrayList<>();
-        Commands.CoordinatedPending<String> coordinated = new Commands.CoordinatedPending<>(
+        OmwhCommands.CoordinatedPending<String> coordinated = new OmwhCommands.CoordinatedPending<>(
                 (candidateBudget, worldBudget) -> {
                     order.add("route");
-                    return Commands.PendingStep.complete("accepted", 1, 1);
-                }, new Commands.CoordinatorHooks<>() {
+                    return OmwhCommands.PendingStep.complete("accepted", 1, 1);
+                }, new OmwhCommands.CoordinatorHooks<>() {
                     @Override public TeleportService.LifecycleStatus lifecycleStatus() {
                         order.add("lifecycle");
                         return TeleportService.LifecycleStatus.CURRENT;
@@ -941,12 +963,12 @@ public final class CommandsAndCooldownsTest {
                     @Override public void complete(String value) { order.add("complete:" + value); }
                 }, 2, 3);
 
-        Commands.PendingStep<Void> first = coordinated.step(1, 1,
-                2 + 3 + Commands.PENDING_ROUTE_MINIMUM_PROGRESS_WORK - 1);
+        OmwhCommands.PendingStep<Void> first = coordinated.step(1, 1,
+                2 + 3 + OmwhCommands.PENDING_ROUTE_MINIMUM_PROGRESS_WORK - 1);
         check(!first.complete() && first.candidatesUsed() == 0 && first.worldWorkUsed() == 0,
                 "coordinator waits until lifecycle, atomic route progress, and completion are all reserved");
-        Commands.PendingStep<Void> second = coordinated.step(1, 1,
-                2 + 3 + Commands.PENDING_ROUTE_MINIMUM_PROGRESS_WORK);
+        OmwhCommands.PendingStep<Void> second = coordinated.step(1, 1,
+                2 + 3 + OmwhCommands.PENDING_ROUTE_MINIMUM_PROGRESS_WORK);
         check(second.complete() && second.candidatesUsed() == 1 && second.worldWorkUsed() == 6,
                 "reserved lifecycle, route, and completion dispatch make progress without deadlock");
         check(order.equals(List.of("lifecycle", "route", "admission:accepted",
@@ -958,29 +980,29 @@ public final class CommandsAndCooldownsTest {
         OmwhConfig config = new OmwhConfig();
         AtomicLong now = new AtomicLong(1_000L);
         Cooldowns cooldowns = new Cooldowns(config, now::get);
-        Commands commands = new Commands(config, cooldowns);
+        OmwhCommands commands = new OmwhCommands(config, cooldowns);
         UUID player = UUID.randomUUID();
         BlockPos acceptedAnchor = new BlockPos(4, 70, -2);
         List<String> events = new ArrayList<>();
 
-        Commands.PendingWork<Void> accepted = commands.createPendingCoordinator(
-                (candidateBudget, worldBudget) -> Commands.PendingStep.complete("accepted", 1, 1),
+        OmwhCommands.PendingWork<Void> accepted = commands.createPendingCoordinator(
+                (candidateBudget, worldBudget) -> OmwhCommands.PendingStep.complete("accepted", 1, 1),
                 () -> TeleportService.LifecycleStatus.CURRENT,
-                value -> Commands.finalCooldownAdmission(cooldowns, player, config, events::add),
+                value -> OmwhCommands.finalCooldownAdmission(cooldowns, player, config, events::add),
                 value -> SpawnDestination.matchesSearchAnchor(acceptedAnchor, acceptedAnchor),
                 value -> events.add("complete:" + value),
                 status -> events.add("lifecycle:" + status));
         check(commands.enqueuePending(player, accepted), "production-created accepted coordinator enqueued");
         commands.tick();
         check(events.equals(List.of("complete:accepted")),
-                "Commands.tick runs cooldown admission, anchor comparison, and completion dispatch");
+                "OmwhCommands.tick runs cooldown admission, anchor comparison, and completion dispatch");
 
         cooldowns.recordRegular(player);
         events.clear();
         check(commands.enqueuePending(player, commands.createPendingCoordinator(
-                (candidateBudget, worldBudget) -> Commands.PendingStep.complete("blocked", 1, 1),
+                (candidateBudget, worldBudget) -> OmwhCommands.PendingStep.complete("blocked", 1, 1),
                 () -> TeleportService.LifecycleStatus.CURRENT,
-                value -> Commands.finalCooldownAdmission(cooldowns, player, config, events::add),
+                value -> OmwhCommands.finalCooldownAdmission(cooldowns, player, config, events::add),
                 value -> true, value -> events.add("complete:" + value),
                 status -> events.add("lifecycle:" + status))), "cooldown coordinator enqueued");
         commands.tick();
@@ -989,7 +1011,7 @@ public final class CommandsAndCooldownsTest {
 
         events.clear();
         check(commands.enqueuePending(player, commands.createPendingCoordinator(
-                (candidateBudget, worldBudget) -> Commands.PendingStep.pending(1, 1),
+                (candidateBudget, worldBudget) -> OmwhCommands.PendingStep.pending(1, 1),
                 () -> TeleportService.LifecycleStatus.TOO_LARGE,
                 value -> true, value -> true, value -> events.add("complete"),
                 status -> events.add(status == TeleportService.LifecycleStatus.TOO_LARGE
@@ -1000,9 +1022,9 @@ public final class CommandsAndCooldownsTest {
                 "oversized pending lifecycle retires with explicit passenger-cap feedback");
 
         AtomicInteger ticketReleases = new AtomicInteger();
-        Commands.PendingWork<String> retainedRoute = new Commands.PendingWork<>() {
-            @Override public Commands.PendingStep<String> step(int candidateBudget, int worldWorkBudget) {
-                return Commands.PendingStep.pending(1, 1);
+        OmwhCommands.PendingWork<String> retainedRoute = new OmwhCommands.PendingWork<>() {
+            @Override public OmwhCommands.PendingStep<String> step(int candidateBudget, int worldWorkBudget) {
+                return OmwhCommands.PendingStep.pending(1, 1);
             }
             @Override public void close() { ticketReleases.incrementAndGet(); }
         };
@@ -1021,7 +1043,7 @@ public final class CommandsAndCooldownsTest {
     private static void admissionAndLifecycleWorkShareHardAggregateAllowances() {
         int admissionLimit = SpawnDestination.PENDING_START_WORK
                 + TeleportService.LIFECYCLE_CAPTURE_WORK;
-        Commands.TickWorkAllowance admission = new Commands.TickWorkAllowance(admissionLimit);
+        OmwhCommands.TickWorkAllowance admission = new OmwhCommands.TickWorkAllowance(admissionLimit);
         check(admission.claim(SpawnDestination.PENDING_START_WORK)
                         && admission.claim(TeleportService.LIFECYCLE_CAPTURE_WORK),
                 "one pending-plan start and one maximum valid lifecycle capture fit the aggregate allowance");
@@ -1031,16 +1053,16 @@ public final class CommandsAndCooldownsTest {
         check(admission.remaining() == admissionLimit,
                 "tick boundary restores exactly the mechanically derived allowance");
 
-        Commands.PendingSearches<Integer, Void> pending = new Commands.PendingSearches<>();
+        OmwhCommands.PendingSearches<Integer, Void> pending = new OmwhCommands.PendingSearches<>();
         AtomicLong lifecycleChecks = new AtomicLong();
         AtomicLong routeSteps = new AtomicLong();
         int crowdedRequests = 1_000;
         for (int request = 0; request < crowdedRequests; request++) {
-            Commands.CoordinatedPending<Void> coordinated = new Commands.CoordinatedPending<>(
+            OmwhCommands.CoordinatedPending<Void> coordinated = new OmwhCommands.CoordinatedPending<>(
                     (candidateBudget, worldBudget) -> {
                         routeSteps.incrementAndGet();
-                        return Commands.PendingStep.pending(1, 1);
-                    }, new Commands.CoordinatorHooks<>() {
+                        return OmwhCommands.PendingStep.pending(1, 1);
+                    }, new OmwhCommands.CoordinatorHooks<>() {
                         @Override public TeleportService.LifecycleStatus lifecycleStatus() {
                             lifecycleChecks.incrementAndGet();
                             return TeleportService.LifecycleStatus.CURRENT;
@@ -1056,31 +1078,31 @@ public final class CommandsAndCooldownsTest {
             check(pending.add(id, (candidateBudget, worldBudget) ->
                     coordinated.step(1, candidateBudget, worldBudget)), "crowded coordinated request added");
         }
-        Commands.PendingTick used = pending.tick(Commands.SEARCH_CANDIDATES_PER_TICK,
-                Commands.PENDING_ADVANCEMENT_WORK_PER_TICK, ignored -> { });
-        check(used.worldWorkUsed() <= Commands.SEARCH_WORLD_WORK_PER_TICK,
+        OmwhCommands.PendingTick used = pending.tick(OmwhCommands.SEARCH_CANDIDATES_PER_TICK,
+                OmwhCommands.PENDING_ADVANCEMENT_WORK_PER_TICK, ignored -> { });
+        check(used.worldWorkUsed() <= OmwhCommands.SEARCH_WORLD_WORK_PER_TICK,
                 "crowded lifecycle traversal cannot exceed aggregate per-tick work");
         check(lifecycleChecks.get() >= routeSteps.get()
                         && lifecycleChecks.get() - routeSteps.get() <= 1
                         && routeSteps.get() > 0 && lifecycleChecks.get() < crowdedRequests,
                 "lifecycle accounting bounds a crowded queue and preserves the next round-robin position");
         long firstTickRoutes = routeSteps.get();
-        pending.tick(Commands.SEARCH_CANDIDATES_PER_TICK,
-                Commands.PENDING_ADVANCEMENT_WORK_PER_TICK, ignored -> { });
+        pending.tick(OmwhCommands.SEARCH_CANDIDATES_PER_TICK,
+                OmwhCommands.PENDING_ADVANCEMENT_WORK_PER_TICK, ignored -> { });
         check(routeSteps.get() > firstTickRoutes && routeSteps.get() < crowdedRequests,
                 "the next crowded slice advances waiting requests before returning to the front");
     }
 
     private static void zeroProgressKeepsTheBlockedRequestNext() {
-        Commands.PendingSearches<Integer, Void> pending = new Commands.PendingSearches<>();
+        OmwhCommands.PendingSearches<Integer, Void> pending = new OmwhCommands.PendingSearches<>();
         List<Integer> progressOrder = new ArrayList<>();
         for (int request = 0; request < 4; request++) {
             int id = request;
-            Commands.CoordinatedPending<Void> coordinated = new Commands.CoordinatedPending<>(
+            OmwhCommands.CoordinatedPending<Void> coordinated = new OmwhCommands.CoordinatedPending<>(
                     (candidateBudget, worldBudget) -> {
                         progressOrder.add(id);
-                        return Commands.PendingStep.pending(1, worldBudget);
-                    }, new Commands.CoordinatorHooks<>() {
+                        return OmwhCommands.PendingStep.pending(1, worldBudget);
+                    }, new OmwhCommands.CoordinatorHooks<>() {
                         @Override public TeleportService.LifecycleStatus lifecycleStatus() {
                             return TeleportService.LifecycleStatus.CURRENT;
                         }
@@ -1096,20 +1118,44 @@ public final class CommandsAndCooldownsTest {
                     "maximum-work fairness request added");
         }
         for (int tick = 0; tick < 4; tick++) {
-            pending.tick(Commands.SEARCH_CANDIDATES_PER_TICK,
-                    Commands.PENDING_ADVANCEMENT_WORK_PER_TICK, ignored -> { });
+            pending.tick(OmwhCommands.SEARCH_CANDIDATES_PER_TICK,
+                    OmwhCommands.PENDING_ADVANCEMENT_WORK_PER_TICK, ignored -> { });
         }
         check(progressOrder.subList(0, 4).equals(List.of(0, 1, 2, 3)),
                 "a blocked maximum-work request stays next instead of starving behind alternating peers");
     }
 
     private static void pendingCommandAdmissionCancelsOnlyCompetingTeleports() {
-        check(Commands.pendingSpawnAction(true, false) == Commands.PendingSpawnAction.REFUSE,
+        check(OmwhCommands.pendingSpawnAction(true, false) == OmwhCommands.PendingSpawnAction.REFUSE,
                 "duplicate normal /spawn remains refused");
-        check(Commands.pendingSpawnAction(true, true) == Commands.PendingSpawnAction.CANCEL_AND_CONTINUE,
+        check(OmwhCommands.pendingSpawnAction(true, true) == OmwhCommands.PendingSpawnAction.CANCEL_AND_CONTINUE,
                 "/spawn force cancels the stale normal search and uses ordinary force admission");
-        check(Commands.pendingSpawnAction(false, false) == Commands.PendingSpawnAction.CONTINUE,
+        check(OmwhCommands.pendingSpawnAction(false, false) == OmwhCommands.PendingSpawnAction.CONTINUE,
                 "a fresh normal /spawn proceeds");
+    }
+
+    private static DestinationSafety.ChunkResidency testResidencyValues(
+            int minBlockX, int maxBlockX, int minBlockZ, int maxBlockZ, LongFunction<?> values) {
+        int minChunkX = Math.floorDiv(minBlockX, 16);
+        int maxChunkX = Math.floorDiv(maxBlockX, 16);
+        int minChunkZ = Math.floorDiv(minBlockZ, 16);
+        int maxChunkZ = Math.floorDiv(maxBlockZ, 16);
+        int capacity = (maxChunkX - minChunkX + 1) * (maxChunkZ - minChunkZ + 1);
+        long[] keys = new long[capacity];
+        Object[] chunks = new Object[capacity];
+        int count = 0;
+        for (int x = minChunkX; x <= maxChunkX; x++) {
+            for (int z = minChunkZ; z <= maxChunkZ; z++) {
+                long key = ((long) x << 32) | (z & 0xffffffffL);
+                Object chunk = values.apply(key);
+                if (chunk == null) continue;
+                keys[count] = key;
+                chunks[count] = chunk;
+                count++;
+            }
+        }
+        int captured = count;
+        return new DestinationSafety.ChunkResidency(keys, chunks, () -> captured);
     }
 
     private static void check(boolean condition, String behavior) {

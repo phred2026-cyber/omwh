@@ -25,33 +25,38 @@ import java.util.function.Predicate;
 import java.util.function.Supplier;
 
 
-public final class Commands {
+public final class OmwhCommands {
     private static final Logger LOGGER = LoggerFactory.getLogger("omwh");
     static final int SEARCH_CANDIDATES_PER_TICK = 4_096;
-    static final int MAX_EFFECT_DISPATCHES = 1 + 40;
-    static final int MAX_PENDING_TICKET_RELEASE_WORK = DestinationSafety.SPAWN_PREPARATION_CHUNK_CAP
-            + DestinationSafety.DESTINATION_CHUNK_CAP;
+    static final int TELEPORT_PARTICLE_COUNT = 40;
+    static final int MAX_EFFECT_DISPATCHES = 1 // optional sound dispatch
+            + TELEPORT_PARTICLE_COUNT; // optional particle dispatches
+    static final int MAX_PENDING_TICKET_RELEASE_WORK = DestinationSafety.SPAWN_PREPARATION_CHUNK_CAP // search-ticket removals
+            + DestinationSafety.DESTINATION_CHUNK_CAP; // accepted-destination ticket removals
     static final int MAX_IMMEDIATE_ROUTE_WORK = Math.max(
-            DestinationSafety.MAX_MOUNTED_HOME_SAFETY_WORK,
-            DestinationSafety.MAX_END_SAFETY_WORK)
-            + DestinationSafety.DESTINATION_CHUNK_CAP
-            + MAX_EFFECT_DISPATCHES
-            + TeleportService.COMPLETION_WORK;
-    static final int SEARCH_WORLD_WORK_PER_TICK = TeleportService.LIFECYCLE_CAPTURE_WORK
-            + MAX_PENDING_TICKET_RELEASE_WORK
+            DestinationSafety.MAX_MOUNTED_HOME_SAFETY_WORK, // exact and optional above-bed home policy
+            DestinationSafety.MAX_END_SAFETY_WORK) // root and player-only End placement checks
+            + DestinationSafety.DESTINATION_CHUNK_CAP // fixed destination chunk preparation
+            + MAX_EFFECT_DISPATCHES // one sound plus forty particle sends
+            + TeleportService.COMPLETION_WORK; // teleport and passenger reconciliation
+    static final int SEARCH_WORLD_WORK_PER_TICK = TeleportService.LIFECYCLE_CAPTURE_WORK // new-request fence capture
+            + MAX_PENDING_TICKET_RELEASE_WORK // competing-request cancellation cleanup
             + Math.max(MAX_IMMEDIATE_ROUTE_WORK,
-            HomeDestination.RESOLUTION_AND_SAFETY_WORK + MAX_EFFECT_DISPATCHES
-                    + TeleportService.COMPLETION_WORK + TeleportService.LIFECYCLE_VALIDATION_WORK);
-    static final int PENDING_ROUTE_MINIMUM_PROGRESS_WORK = DestinationSafety.SpawnProbe.MAX_CELL_WORK;
+            HomeDestination.RESOLUTION_AND_SAFETY_WORK // saved-respawn resolution and home safety
+                    + MAX_EFFECT_DISPATCHES // completion sound and particle sends
+                    + TeleportService.COMPLETION_WORK // teleport and passenger reconciliation
+                    + TeleportService.LIFECYCLE_VALIDATION_WORK); // final pending-request fence validation
+    static final int PENDING_ROUTE_MINIMUM_PROGRESS_WORK = DestinationSafety.MAX_PROBE_CELL_WORK;
     static final int PENDING_ROUTE_WORK_SLICE = Math.max(
-            SEARCH_CANDIDATES_PER_TICK * PENDING_ROUTE_MINIMUM_PROGRESS_WORK,
-            HomeDestination.RESOLUTION_AND_SAFETY_WORK + SpawnDestination.PREPARATION_CHUNKS_PER_VISIT);
-    static final int PENDING_COMPLETION_WORK = MAX_EFFECT_DISPATCHES
-            + TeleportService.COMPLETION_WORK;
-    static final int PENDING_ADVANCEMENT_WORK_PER_TICK = TeleportService.LIFECYCLE_VALIDATION_WORK
-            + PENDING_ROUTE_WORK_SLICE
-            + PENDING_COMPLETION_WORK
-            + MAX_PENDING_TICKET_RELEASE_WORK;
+            SEARCH_CANDIDATES_PER_TICK * PENDING_ROUTE_MINIMUM_PROGRESS_WORK, // one maximum-cost probe cell per candidate start
+            HomeDestination.RESOLUTION_AND_SAFETY_WORK // complete saved-respawn and home-safety work
+                    + SpawnDestination.PREPARATION_CHUNKS_PER_VISIT); // one terrain-preparation quantum
+    static final int PENDING_COMPLETION_WORK = MAX_EFFECT_DISPATCHES // sound and particle sends
+            + TeleportService.COMPLETION_WORK; // teleport and passenger reconciliation
+    static final int PENDING_ADVANCEMENT_WORK_PER_TICK = TeleportService.LIFECYCLE_VALIDATION_WORK // one full fence validation
+            + PENDING_ROUTE_WORK_SLICE // one bounded search or home-resolution visit
+            + PENDING_COMPLETION_WORK // effects, teleport, and reconciliation
+            + MAX_PENDING_TICKET_RELEASE_WORK; // terminal ticket cleanup
     static final int MAX_PENDING_VISIT_WORK = PENDING_ADVANCEMENT_WORK_PER_TICK;
     private final OmwhConfig config;
     private final Cooldowns cooldowns;
@@ -286,23 +291,21 @@ public final class Commands {
             return worldWork;
         }
 
-        private int closeOrRetain(PendingWork<V> work) {
-            int worldWork = work.closeWork();
+        private void closeOrRetain(PendingWork<V> work) {
             try {
                 work.close();
             } catch (RuntimeException failure) {
                 cleanup.addLast(work);
                 LOGGER.error("OMWH could not release pending teleport terrain; cleanup will retry", failure);
             }
-            return worldWork;
         }
     }
 
-    Commands(OmwhConfig config, Cooldowns cooldowns) {
+    OmwhCommands(OmwhConfig config, Cooldowns cooldowns) {
         this(config, cooldowns, SEARCH_WORLD_WORK_PER_TICK);
     }
 
-    Commands(OmwhConfig config, Cooldowns cooldowns, int serverWorkLimit) {
+    OmwhCommands(OmwhConfig config, Cooldowns cooldowns, int serverWorkLimit) {
         this.config = config;
         this.cooldowns = cooldowns;
         this.serverWork = new TickWorkAllowance(serverWorkLimit);
@@ -418,7 +421,7 @@ public final class Commands {
 
     private int executeHome(ServerPlayer player, boolean force) {
         if (player == null) return 0;
-        cancelPendingForHome(player.getUUID());
+        cancelPending(player.getUUID());
         try {
             if (!admit(player)) return 0;
             if (!serverWork.claim(SpawnDestination.PENDING_START_WORK)) {
@@ -474,7 +477,7 @@ public final class Commands {
             return 0;
         }
         if (pendingAction == PendingSpawnAction.CANCEL_AND_CONTINUE) {
-            cancelPendingForForcedSpawn(player.getUUID());
+            cancelPending(player.getUUID());
         }
         try {
             if (!admit(player)) return 0;
@@ -497,7 +500,7 @@ public final class Commands {
                     send(player, commandMessage(config.busyMessage, config.spawnCommand));
                     return 0;
                 }
-                TeleportService.captureLifecycle(player);
+                TeleportService.validatePassengerTreeForImmediateTeleport(player);
             } else if (!serverWork.claim(SpawnDestination.PENDING_START_WORK)) {
                 send(player, commandMessage(config.busyMessage, config.spawnCommand));
                 return 0;
@@ -507,6 +510,7 @@ public final class Commands {
 
             SpawnDestination.Pending search = plan.pending();
             if (!serverWork.claim(TeleportService.LIFECYCLE_CAPTURE_WORK)) {
+                search.close();
                 send(player, commandMessage(config.busyMessage, config.spawnCommand));
                 return 0;
             }
@@ -551,10 +555,6 @@ public final class Commands {
     }
 
 
-    static <V> PendingStep<V> failedPendingStep(V value, int candidateBudget, int worldWorkBudget) {
-        return PendingStep.complete(value, candidateBudget, worldWorkBudget);
-    }
-
     static <V> PendingWork<V> guardPending(PendingWork<V> work,
                                             Consumer<RuntimeException> failureHandler) {
         return new PendingWork<>() {
@@ -564,7 +564,7 @@ public final class Commands {
                     return work.step(candidateBudget, worldWorkBudget);
                 } catch (RuntimeException failure) {
                     failureHandler.accept(failure);
-                    return failedPendingStep(null, candidateBudget, worldWorkBudget);
+                    return PendingStep.complete(null, candidateBudget, worldWorkBudget);
                 }
             }
 
@@ -615,9 +615,6 @@ public final class Commands {
         };
     }
 
-    static boolean shouldLoadDestinationChunks(boolean destinationPrepared) {
-        return !destinationPrepared;
-    }
 
     void tick() {
         try {
@@ -631,16 +628,12 @@ public final class Commands {
         }
     }
 
-    void cancelPendingForHome(UUID playerId) { cancelPending(playerId); }
-    void cancelPendingForForcedSpawn(UUID playerId) { cancelPending(playerId); }
-    void removePending(UUID playerId) { cancelPending(playerId); }
-    void respawnPending(UUID playerId) { cancelPending(playerId); }
-    void clearPending() { pendingTeleports.clearTerminal(); }
-    int remainingServerWork() { return serverWork.remaining(); }
-
-    private void cancelPending(UUID playerId) {
+    void cancelPending(UUID playerId) {
         pendingTeleports.cancel(playerId, serverWork);
     }
+
+    void clearPending() { pendingTeleports.clearTerminal(); }
+    int remainingServerWork() { return serverWork.remaining(); }
 
     private int completeHome(ServerPlayer player, HomeDestination.Result destination) {
         return switch (destination.outcome()) {
@@ -650,6 +643,10 @@ public final class Commands {
             }
             case CROSS_DIMENSION -> {
                 send(player, commandMessage(config.crossDimensionMessage, config.homeCommand));
+                yield 0;
+            }
+            case CURRENT_WORLD_UNAVAILABLE -> {
+                send(player, homeDenialMessage(config, destination.outcome()));
                 yield 0;
             }
             case VEHICLE_TOO_LARGE -> {
@@ -662,6 +659,14 @@ public final class Commands {
             }
             case ACCEPT -> teleport(player, destination.destination(), true, true);
         };
+    }
+
+    static String homeDenialMessage(OmwhConfig config, HomeDestination.Outcome outcome) {
+        if (outcome != HomeDestination.Outcome.CURRENT_WORLD_UNAVAILABLE) {
+            throw new IllegalArgumentException("outcome has no unavailable-world message");
+        }
+        return renderMessage(config, config.currentWorldUnavailableMessage,
+                new MessageValues(config.homeCommand, null, null, null, false));
     }
 
     private int completeSpawn(ServerPlayer player, SpawnDestination.Result destination) {
@@ -701,7 +706,7 @@ public final class Commands {
 
     private int teleport(ServerPlayer player, DestinationSafety.Prepared destination, boolean home,
                          boolean destinationPrepared) {
-        if (shouldLoadDestinationChunks(destinationPrepared)) {
+        if (!destinationPrepared) {
             DestinationSafety.loadDestinationChunks(destination.level(), destination.position());
         }
         playEffects(player);
@@ -740,8 +745,8 @@ public final class Commands {
     private void playEffects(ServerPlayer player) {
         if (config.playTeleportSound) player.playSound(SoundEvents.ENDERMAN_TELEPORT, 0.5f, 1.0f);
         if (!config.spawnTeleportParticles || !(player.level() instanceof ServerLevel level)) return;
-        for (int i = 0; i < 40; i++) {
-            double angle = i * 2 * Math.PI / 40.0;
+        for (int i = 0; i < TELEPORT_PARTICLE_COUNT; i++) {
+            double angle = i * 2 * Math.PI / TELEPORT_PARTICLE_COUNT;
             level.sendParticles(ParticleTypes.PORTAL, player.getX() + Math.cos(angle),
                     player.getY() + 0.5, player.getZ() + Math.sin(angle), 1, 0, 0, 0, 0);
         }
@@ -760,6 +765,18 @@ public final class Commands {
     }
 
     static String format(String message) {
-        return message.replace('&', '§');
+        StringBuilder formatted = new StringBuilder(message.length());
+        for (int index = 0; index < message.length(); index++) {
+            char current = message.charAt(index);
+            if (current != '&') {
+                formatted.append(current);
+            } else if (index + 1 < message.length() && message.charAt(index + 1) == '&') {
+                formatted.append('&');
+                index++;
+            } else {
+                formatted.append('§');
+            }
+        }
+        return formatted.toString();
     }
 }

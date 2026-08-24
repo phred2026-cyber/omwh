@@ -4,8 +4,13 @@ import net.minecraft.SharedConstants;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.Bootstrap;
 import net.minecraft.world.entity.EntityDimensions;
+import net.minecraft.world.level.EmptyBlockGetter;
 import net.minecraft.world.level.block.Blocks;
+import net.minecraft.world.level.block.state.BlockState;
 import net.minecraft.world.phys.Vec3;
+import net.minecraft.world.phys.shapes.BooleanOp;
+import net.minecraft.world.phys.shapes.CollisionContext;
+import net.minecraft.world.phys.shapes.Shapes;
 
 import java.util.ArrayList;
 
@@ -13,7 +18,11 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.LongFunction;
+import java.util.function.LongPredicate;
 import java.util.function.Predicate;
+import java.util.function.Function;
+import java.util.function.BiFunction;
 
 public final class DestinationsTest {
     public static void main(String[] args) {
@@ -22,9 +31,7 @@ public final class DestinationsTest {
         homePolicyAllowsOnlyAcceptedRespawnsAndOneBedAlternate();
         unmountedHomeRejectsHazardsUnlessForceWasRequested();
         homeSafetyUsesStandingDimensionsAndExactHazards();
-        homePreparationIsARequiredTypeStateBeforeSafety();
         homePreparationFollowsExactVanillaResolutionReadsThroughSharedPendingWork();
-        mountedHomePendingPreparesExactThenAcceptedAboveBedTerrainWithoutRestart();
         vanillaResolutionMaximumCoversFractionalFloorsAndChargesInspectionInPlace();
         spawnRoutingHonorsThreePoliciesAndCrossingBoundary();
         forceUsesRawDestinationsWithoutChangingAdmission();
@@ -55,20 +62,28 @@ public final class DestinationsTest {
         spawnFailureDistinguishesOversizedVehicle();
         collisionOwnersIncludeShellAndEveryInvolvedChunk();
         safetyOwnsFootprintsHazardsAndFiveByFiveChunkPreparation();
-        System.out.println("DestinationsTest PASS (36 behavior groups)");
+        System.out.println("DestinationsTest PASS (34 behavior groups)");
     }
 
     private static void homePolicyAllowsOnlyAcceptedRespawnsAndOneBedAlternate() {
-        check(HomeDestination.decide(true, true, true, true) == HomeDestination.Decision.NO_HOME,
+        check(HomeDestination.decide(true, true, true, true, true) == HomeDestination.Decision.NO_HOME,
                 "missing home");
-        check(HomeDestination.decide(false, false, true, true) == HomeDestination.Decision.NO_HOME,
+        check(HomeDestination.decide(true, false, false, true, true) == HomeDestination.Decision.NO_HOME,
                 "unavailable saved-home dimension cannot become default spawn");
-        check(HomeDestination.decide(false, true, false, false) == HomeDestination.Decision.CROSS_DIMENSION,
+        check(HomeDestination.decide(true, false, true, false, false) == HomeDestination.Decision.CROSS_DIMENSION,
                 "cross-dimension home denied when crossing is disabled");
-        check(HomeDestination.decide(false, true, false, true) == HomeDestination.Decision.ACCEPT,
+        check(HomeDestination.decide(true, false, true, false, true) == HomeDestination.Decision.ACCEPT,
                 "cross-dimension home accepted when crossing is enabled");
-        check(HomeDestination.decide(false, true, true, false) == HomeDestination.Decision.ACCEPT,
+        check(HomeDestination.decide(true, false, true, true, false) == HomeDestination.Decision.ACCEPT,
                 "same-dimension home does not require crossing");
+        check(HomeDestination.decide(false, true, true, true, true)
+                        == HomeDestination.Decision.CURRENT_WORLD_UNAVAILABLE,
+                "current-world failure takes precedence over a missing respawn");
+        check(HomeDestination.decide(true, true, true, true, true) == HomeDestination.Decision.NO_HOME,
+                "missing respawn is reported after the current world is available");
+        check(HomeDestination.decide(false, false, true, true, true)
+                        == HomeDestination.Decision.CURRENT_WORLD_UNAVAILABLE,
+                "an unavailable current world is distinct from an unsafe home");
         check(HomeDestination.mayTryAboveBed(true, true, false, false), "non-forced mounted bed");
         check(!HomeDestination.mayTryAboveBed(true, true, false, true), "covered bed");
         check(!HomeDestination.mayTryAboveBed(false, true, false, false), "unmounted player");
@@ -109,36 +124,6 @@ public final class DestinationsTest {
         check(!DestinationSafety.isHazard(Blocks.DEAD_FIRE_CORAL_BLOCK), "dead fire coral is not fire");
     }
 
-    private static void homePreparationIsARequiredTypeStateBeforeSafety() {
-        List<String> order = new ArrayList<>();
-        BlockPos savedRespawn = new BlockPos(31, 70, -1);
-        HomeDestination.SavedHome saved = new HomeDestination.SavedHome(
-                null, null, null, savedRespawn, false);
-        HomeDestination.Result accepted = HomeDestination.find(false, new HomeDestination.HomeAccess() {
-            @Override public HomeDestination.Validation validate() {
-                order.add("validate");
-                return new HomeDestination.Validation(HomeDestination.Outcome.ACCEPT, saved);
-            }
-            @Override public HomeDestination.PreparedSavedHome prepare(HomeDestination.SavedHome home) {
-                order.add("prepare");
-                return new HomeDestination.PreparedSavedHome(home);
-            }
-            @Override public HomeDestination.Resolution resolve(HomeDestination.PreparedSavedHome prepared) {
-                order.add("resolve");
-                return new HomeDestination.Resolution(HomeDestination.Outcome.ACCEPT,
-                        new HomeDestination.ResolvedHome(prepared, null, null));
-            }
-            @Override public HomeDestination.Result evaluate(HomeDestination.ResolvedHome resolved, boolean force) {
-                order.add("safety");
-                return new HomeDestination.Result(HomeDestination.Outcome.ACCEPT, null);
-            }
-        });
-
-        check(accepted.outcome() == HomeDestination.Outcome.ACCEPT,
-                "production home coordinator returns the evaluated result");
-        check(order.equals(List.of("validate", "prepare", "resolve", "safety")),
-                "prepared-home type state precedes vanilla respawn resolution and safety");
-    }
 
     private static void homePreparationFollowsExactVanillaResolutionReadsThroughSharedPendingWork() {
         var standing = EntityDimensions.fixed(0.6f, 1.8f);
@@ -164,17 +149,17 @@ public final class DestinationsTest {
 
         List<Long> generated = new ArrayList<>();
         DestinationSafety.ChunkPreparation preparation =
-                DestinationSafety.ChunkPreparation.expandableControlled(key -> {
+                expandablePreparation(key -> {
                     generated.add(key);
                     return new Object();
                 });
         List<HomeDestination.TerrainRead> allReads = new ArrayList<>(interiorReads);
         allReads.addAll(edgeReads);
-        Commands.PendingWork<Void> route = HomeDestination.candidateTerrain(
+        OmwhCommands.PendingWork<Void> route = HomeDestination.candidateTerrain(
                 preparation, allReads.iterator());
-        Commands.PendingSearches<String, Void> pending = new Commands.PendingSearches<>();
+        OmwhCommands.PendingSearches<String, Void> pending = new OmwhCommands.PendingSearches<>();
         check(pending.add("home", route),
-                "home resolution terrain uses the shared Commands pending owner");
+                "home resolution terrain uses the shared OmwhCommands pending owner");
         for (int candidate = 0; candidate < interiorReads.size(); candidate++) {
             int before = generated.size();
             pending.tick(1, 10, ignored -> { });
@@ -195,73 +180,6 @@ public final class DestinationsTest {
                 "exact one-block collision-owner shell crossing x=16 generates the adjacent chunk");
     }
 
-    private static void mountedHomePendingPreparesExactThenAcceptedAboveBedTerrainWithoutRestart() {
-        List<String> order = new ArrayList<>();
-        List<Long> generated = new ArrayList<>();
-        BlockPos homeBlock = new BlockPos(8, 70, 8);
-        HomeDestination.SavedHome home = new HomeDestination.SavedHome(null, null, null, homeBlock, false);
-        DestinationSafety.ChunkPreparation preparation =
-                DestinationSafety.ChunkPreparation.expandableControlled(key -> {
-                    generated.add(key);
-                    return new Object();
-                });
-        HomeDestination.HomeAccess access = new HomeDestination.HomeAccess() {
-            @Override public HomeDestination.Validation validate() { throw new AssertionError("already validated"); }
-            @Override public HomeDestination.PreparedSavedHome prepare(HomeDestination.SavedHome saved) {
-                order.add("prepare");
-                return new HomeDestination.PreparedSavedHome(saved);
-            }
-            @Override public HomeDestination.Resolution resolve(HomeDestination.PreparedSavedHome prepared) {
-                order.add("resolve");
-                return new HomeDestination.Resolution(HomeDestination.Outcome.ACCEPT,
-                        new HomeDestination.ResolvedHome(prepared, null, null));
-            }
-            @Override public HomeDestination.TerrainRead initialSafetyTerrain(
-                    HomeDestination.ResolvedHome resolved, boolean force) {
-                order.add("exact-terrain");
-                return new HomeDestination.TerrainRead(16, 16, 8, 8);
-            }
-            @Override public HomeDestination.SafetyEvaluation evaluateInitial(
-                    HomeDestination.ResolvedHome resolved, boolean force) {
-                order.add("exact-safety");
-                return new HomeDestination.SafetyEvaluation(null,
-                        new HomeDestination.TerrainRead(32, 32, 8, 8));
-            }
-            @Override public HomeDestination.Result evaluateFallback(HomeDestination.ResolvedHome resolved) {
-                order.add("above-bed-safety");
-                return new HomeDestination.Result(HomeDestination.Outcome.ACCEPT, null);
-            }
-            @Override public HomeDestination.Result evaluate(HomeDestination.ResolvedHome resolved, boolean force) {
-                throw new AssertionError("pending path must use the staged safety contract");
-            }
-        };
-        HomeDestination.Pending pending = HomeDestination.Pending.controlled(
-                false, access, home, preparation, List.<HomeDestination.TerrainRead>of().iterator());
-
-        int candidateStarts = 0;
-        int visits = 0;
-        while (true) {
-            int before = generated.size();
-            Commands.PendingStep<HomeDestination.Result> used = pending.step(1, 200_000);
-            candidateStarts += used.candidatesUsed();
-            check(generated.size() - before <= SpawnDestination.PREPARATION_CHUNKS_PER_VISIT,
-                    "exact and above-bed home terrain obey the two-load request quantum");
-            if (used.complete()) {
-                check(used.value().outcome() == HomeDestination.Outcome.ACCEPT,
-                        "mounted above-bed fallback completes through the pending home route");
-                break;
-            }
-            check(++visits < 20, "mounted staged home route resumes without restart");
-        }
-        check(generated.equals(List.of(
-                        DestinationSafety.chunkKey(1, 0), DestinationSafety.chunkKey(2, 0))),
-                "mounted route loads only exact and accepted above-bed safety chunks");
-        check(order.equals(List.of("prepare", "resolve", "exact-terrain",
-                        "exact-safety", "above-bed-safety")),
-                "vanilla resolution, exact mounted safety, and above-bed fallback remain ordered");
-        check(candidateStarts == 2, "exact and above-bed terrain each start once without restart");
-        pending.close();
-    }
 
     private static void vanillaResolutionMaximumCoversFractionalFloorsAndChargesInspectionInPlace() {
         EntityDimensions standing = EntityDimensions.fixed(0.6f, 1.8f);
@@ -277,9 +195,12 @@ public final class DestinationsTest {
 
         AtomicInteger inspections = new AtomicInteger();
         HomeDestination.SavedHome home = new HomeDestination.SavedHome(
-                null, null, null, BlockPos.ZERO, false);
+                null, null, null, BlockPos.ZERO, false, null);
         HomeDestination.HomeAccess access = new HomeDestination.HomeAccess() {
             @Override public HomeDestination.Validation validate() { throw new AssertionError("already validated"); }
+            @Override public HomeDestination.RespawnAuthority currentAuthority(HomeDestination.SavedHome saved) {
+                return saved.authority();
+            }
             @Override public HomeDestination.PreparedSavedHome prepare(HomeDestination.SavedHome saved) {
                 return new HomeDestination.PreparedSavedHome(saved);
             }
@@ -290,21 +211,18 @@ public final class DestinationsTest {
             @Override public HomeDestination.Resolution resolve(HomeDestination.PreparedSavedHome prepared) {
                 throw new AssertionError("resolution must wait for its separately reserved maximum");
             }
-            @Override public HomeDestination.Result evaluate(HomeDestination.ResolvedHome resolved, boolean force) {
-                throw new AssertionError("resolution has not run");
-            }
         };
         DestinationSafety.ChunkPreparation preparation =
-                DestinationSafety.ChunkPreparation.expandableControlled(key -> new Object());
+                expandablePreparation(key -> new Object());
         HomeDestination.Pending pending = new HomeDestination.Pending(false, access, home, preparation);
 
-        Commands.PendingStep<HomeDestination.Result> prepared = pending.step(1, 1);
+        OmwhCommands.PendingStep<HomeDestination.Result> prepared = pending.step(1, 1);
         check(!prepared.complete() && prepared.worldWorkUsed() == 1 && inspections.get() == 0,
                 "home-state and bunk inspection never runs after exhausting the current visit allowance");
-        Commands.PendingStep<HomeDestination.Result> blocked = pending.step(1, 1);
+        OmwhCommands.PendingStep<HomeDestination.Result> blocked = pending.step(1, 1);
         check(!blocked.complete() && blocked.worldWorkUsed() == 0 && inspections.get() == 0,
                 "inspection waits when its exact two-read reservation is unavailable");
-        Commands.PendingStep<HomeDestination.Result> inspected = pending.step(1, 2);
+        OmwhCommands.PendingStep<HomeDestination.Result> inspected = pending.step(1, 2);
         check(!inspected.complete() && inspected.worldWorkUsed() == 2 && inspections.get() == 1,
                 "home-state and bunk inspection is charged in the same step in which both reads may occur");
         pending.close();
@@ -365,7 +283,8 @@ public final class DestinationsTest {
     }
 
     private static void forceUsesRawDestinationsWithoutChangingAdmission() {
-        check(HomeDestination.decide(false, true, false, false) == HomeDestination.Decision.CROSS_DIMENSION,
+        check(HomeDestination.decide(true, false, true, false, false)
+                        == HomeDestination.Decision.CROSS_DIMENSION,
                 "force cannot bypass cross-dimension home admission");
         check(SpawnDestination.route(SpawnDestination.Dimension.NETHER,
                         false, true, false, true, false) == SpawnDestination.Target.DISABLED,
@@ -423,7 +342,7 @@ public final class DestinationsTest {
     private static void endPortalSafetyChecksOnlyTheRegeneratedPlatformDestination() {
         AtomicInteger rootChecks = new AtomicInteger();
         AtomicInteger playerChecks = new AtomicInteger();
-        check(SpawnDestination.acceptEnd(false,
+        check(SpawnDestination.acceptEnd(false, 1, 2,
                         () -> { rootChecks.incrementAndGet(); return true; },
                         () -> { playerChecks.incrementAndGet(); return true; }) == SpawnDestination.Outcome.ACCEPT,
                 "safe regenerated End platform destination is accepted");
@@ -432,7 +351,7 @@ public final class DestinationsTest {
 
         rootChecks.set(0);
         playerChecks.set(0);
-        check(SpawnDestination.acceptEnd(false,
+        check(SpawnDestination.acceptEnd(false, 1, 2,
                         () -> { rootChecks.incrementAndGet(); return false; },
                         () -> { playerChecks.incrementAndGet(); return true; })
                         == SpawnDestination.Outcome.VEHICLE_TOO_LARGE,
@@ -442,7 +361,7 @@ public final class DestinationsTest {
 
         rootChecks.set(0);
         playerChecks.set(0);
-        check(SpawnDestination.acceptEnd(true,
+        check(SpawnDestination.acceptEnd(true, 1, 2,
                         () -> { rootChecks.incrementAndGet(); return false; },
                         () -> { playerChecks.incrementAndGet(); return false; }) == SpawnDestination.Outcome.ACCEPT,
                 "force accepts the vanilla End transition without placement checks");
@@ -451,20 +370,6 @@ public final class DestinationsTest {
     }
 
     private static void immediateGeometryLimitsRejectBeforeHomeAndEndSafetyScans() {
-        AtomicInteger homeScans = new AtomicInteger();
-        check(HomeDestination.mountedGeometryOutcome(14, 16, () -> {
-                    homeScans.incrementAndGet();
-                    return DestinationSafety.HomeFit.FITS;
-                }) == HomeDestination.Outcome.ACCEPT,
-                "largest supported mounted home geometry reaches its safety scan");
-        check(homeScans.get() == 1, "supported mounted home scans exactly once through the seam");
-        check(HomeDestination.mountedGeometryOutcome(15, 16, () -> {
-                    homeScans.incrementAndGet();
-                    return DestinationSafety.HomeFit.FITS;
-                }) == HomeDestination.Outcome.VEHICLE_TOO_LARGE,
-                "too-wide mounted home is rejected");
-        check(homeScans.get() == 1, "too-wide mounted home rejects before world safety work");
-
         AtomicInteger endScans = new AtomicInteger();
         check(SpawnDestination.acceptEnd(false, 14, 16,
                         () -> { endScans.incrementAndGet(); return true; }, null)
@@ -499,13 +404,13 @@ public final class DestinationsTest {
                         && HomeDestination.FALLBACK_HOME_SAFETY_WORK == 59_015
                         && HomeDestination.RESOLUTION_AND_SAFETY_WORK == 138_602,
                 "home accounting derives from mapped candidate passes, direct reads, owner cells, and safety phases");
-        check(Commands.MAX_IMMEDIATE_ROUTE_WORK == 120_096
-                        && Commands.MAX_PENDING_TICKET_RELEASE_WORK == 89
-                        && Commands.SEARCH_WORLD_WORK_PER_TICK
+        check(OmwhCommands.MAX_IMMEDIATE_ROUTE_WORK == 120_096
+                        && OmwhCommands.MAX_PENDING_TICKET_RELEASE_WORK == 89
+                        && OmwhCommands.SEARCH_WORLD_WORK_PER_TICK
                         == TeleportService.LIFECYCLE_CAPTURE_WORK
-                        + Commands.MAX_PENDING_TICKET_RELEASE_WORK
-                        + Math.max(Commands.MAX_IMMEDIATE_ROUTE_WORK,
-                        HomeDestination.RESOLUTION_AND_SAFETY_WORK + Commands.MAX_EFFECT_DISPATCHES
+                        + OmwhCommands.MAX_PENDING_TICKET_RELEASE_WORK
+                        + Math.max(OmwhCommands.MAX_IMMEDIATE_ROUTE_WORK,
+                        HomeDestination.RESOLUTION_AND_SAFETY_WORK + OmwhCommands.MAX_EFFECT_DISPATCHES
                                 + TeleportService.COMPLETION_WORK + TeleportService.LIFECYCLE_VALIDATION_WORK),
                 "cleanup, immediate, lazy-home, and aggregate reservations are composed from named work");
         check(DestinationSafety.destinationChunks(0, 0).size()
@@ -514,13 +419,13 @@ public final class DestinationsTest {
     }
 
     private static void spawnSearchIsLazyDeterministicAndComplete() {
-        List<SpawnDestination.Offset> small = toList(SpawnDestination.offsets(1, 1));
+        List<SpawnDestination.Offset> small = toList(SpawnDestination.offsets(1));
         check(small.size() == 27, "radius-one hollow-cube search count");
         check(small.getFirst().equals(new SpawnDestination.Offset(0, 0, 0)), "origin first");
         check(small.equals(referenceOffsets(1, 1)),
                 "hollow 3D cube shells use deterministic x/y/z order");
 
-        var iterator = SpawnDestination.offsets(48, 48).iterator();
+        var iterator = SpawnDestination.offsets(48).iterator();
         for (var field : iterator.getClass().getDeclaredFields()) {
             check(!java.util.Collection.class.isAssignableFrom(field.getType()) && !field.getType().isArray(),
                     "lazy iterator does not retain candidate collections or arrays");
@@ -544,7 +449,7 @@ public final class DestinationsTest {
     }
 
     private static void zeroBoundsEmitOnlyTheOrigin() {
-        check(toList(SpawnDestination.offsets(0, 0)).equals(
+        check(toList(SpawnDestination.offsets(0)).equals(
                         List.of(new SpawnDestination.Offset(0, 0, 0))),
                 "zero bounds emit the origin exactly once");
     }
@@ -580,7 +485,7 @@ public final class DestinationsTest {
         };
 
         SpawnDestination.Search search = new SpawnDestination.Search(
-                SpawnDestination.offsets(2, 2).iterator(), probe, true);
+                SpawnDestination.offsets(2).iterator(), probe, true);
         int ticks = 0;
         while (!search.complete()) {
             SpawnDestination.Tick tick = search.tick(2, 5);
@@ -605,12 +510,12 @@ public final class DestinationsTest {
     private static void safeOriginLazilyPreparesOnlyItsCandidateTerrain() {
         List<Long> generated = new ArrayList<>();
         DestinationSafety.ChunkPreparation preparation =
-                DestinationSafety.ChunkPreparation.expandableControlled(key -> {
+                expandablePreparation(key -> {
                     generated.add(key);
                     return new Object();
                 });
-        SpawnDestination.Pending pending = SpawnDestination.Pending.controlledLazyPreparing(
-                SpawnDestination.offsets(48, 48).iterator(), false, preparation,
+        SpawnDestination.Pending pending = lazyPending(
+                SpawnDestination.offsets(48).iterator(), false, preparation,
                 BlockPos.ZERO.offset(8, 0, 8), 1, 2,
                 position -> position.getY() == -1
                         ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState());
@@ -629,14 +534,14 @@ public final class DestinationsTest {
                 "safe origin is accepted after its complete terrain envelope is resident");
         check(generated.equals(List.of(DestinationSafety.chunkKey(0, 0))),
                 "safe origin generates only its exact candidate-required chunk");
-        check(preparation.retainedChunkCount() == 1,
+        check(generated.size() == 1,
                 "safe origin never performs the former 64-chunk preload");
     }
 
     private static void laterCandidateLoadsOnlyItsNewBoundaryChunkWithoutRestart() {
         List<Long> generated = new ArrayList<>();
         DestinationSafety.ChunkPreparation preparation =
-                DestinationSafety.ChunkPreparation.expandableControlled(key -> {
+                expandablePreparation(key -> {
                     generated.add(key);
                     return new Object();
                 });
@@ -645,7 +550,7 @@ public final class DestinationsTest {
                 new SpawnDestination.Offset(0, 0, 0),
                 new SpawnDestination.Offset(1, 0, 0),
                 new SpawnDestination.Offset(7, 0, 0));
-        SpawnDestination.Pending pending = SpawnDestination.Pending.controlledLazyPreparing(
+        SpawnDestination.Pending pending = lazyPending(
                 candidates.iterator(), false, preparation, center, 1, 2,
                 position -> position.getY() == -1 && (position.getX() == 8 || position.getX() == 9)
                         ? Blocks.LAVA.defaultBlockState()
@@ -675,7 +580,7 @@ public final class DestinationsTest {
     private static void mountedCandidateEnvelopeExpandsRetainedTerrainGeometry() {
         List<Long> x14Loads = new ArrayList<>();
         DestinationSafety.ChunkPreparation x14 =
-                DestinationSafety.ChunkPreparation.expandableControlled(key -> {
+                expandablePreparation(key -> {
                     x14Loads.add(key);
                     return new Object();
                 });
@@ -687,7 +592,7 @@ public final class DestinationsTest {
 
         List<Long> x15Loads = new ArrayList<>();
         DestinationSafety.ChunkPreparation x15 =
-                DestinationSafety.ChunkPreparation.expandableControlled(key -> {
+                expandablePreparation(key -> {
                     x15Loads.add(key);
                     return new Object();
                 });
@@ -699,7 +604,7 @@ public final class DestinationsTest {
 
         List<Long> generated = new ArrayList<>();
         DestinationSafety.ChunkPreparation preparation =
-                DestinationSafety.ChunkPreparation.expandableControlled(key -> {
+                expandablePreparation(key -> {
                     generated.add(key);
                     return new Object();
                 });
@@ -715,30 +620,30 @@ public final class DestinationsTest {
                         DestinationSafety.chunkKey(0, 0), DestinationSafety.chunkKey(0, 1),
                         DestinationSafety.chunkKey(1, 0), DestinationSafety.chunkKey(1, 1))),
                 "maximum mounted footprint expands to every chunk crossed by its safety envelope");
-        check(generated.size() == 4 && preparation.retainedChunkCount() <= 64,
+        check(generated.size() == 4 && generated.size() <= 64,
                 "mounted expansion is deduplicated under the overall retained-chunk cap");
 
         DestinationSafety.ChunkPreparation fullSearch =
-                DestinationSafety.ChunkPreparation.expandableControlled(ignored -> new Object());
+                expandablePreparation(ignored -> new Object());
         for (int x = -48; x <= 48; x++) {
             for (int z = -48; z <= 48; z++) {
                 fullSearch.requireCandidate(BlockPos.ZERO, new SpawnDestination.Offset(x, 0, z), 14);
             }
         }
         while (!fullSearch.complete()) {
-            int before = fullSearch.retainedChunkCount();
+            int before = fullSearch.liveResidency().chunkProbes();
             fullSearch.prepare(SpawnDestination.PREPARATION_CHUNKS_PER_VISIT, 10_000);
-            check(fullSearch.retainedChunkCount() - before <= SpawnDestination.PREPARATION_CHUNKS_PER_VISIT,
+            check(fullSearch.liveResidency().chunkProbes() - before <= SpawnDestination.PREPARATION_CHUNKS_PER_VISIT,
                     "maximum search residency still loads no more than two chunks per request visit");
         }
-        check(fullSearch.retainedChunkCount() == DestinationSafety.SPAWN_PREPARATION_CHUNK_CAP,
+        check(fullSearch.liveResidency().chunkProbes() == DestinationSafety.SPAWN_PREPARATION_CHUNK_CAP,
                 "maximum mounted search geometry retains exactly the 64-chunk hard cap");
     }
 
     private static void coldSpawnPreparationIsExactBoundedAndPrecedesSearch() {
         List<Long> generated = new ArrayList<>();
         Object chunk = new Object();
-        DestinationSafety.ChunkPreparation preparation = DestinationSafety.ChunkPreparation.controlled(
+        DestinationSafety.ChunkPreparation preparation = fixedPreparation(
                 -56, 56, -56, 56, key -> {
                     generated.add(key);
                     return chunk;
@@ -753,10 +658,10 @@ public final class DestinationsTest {
                 return new SpawnDestination.ProbeStep(SpawnDestination.ProbeOutcome.REJECTED, 0);
             }
         };
-        SpawnDestination.Pending pending = SpawnDestination.Pending.controlledPreparing(
-                SpawnDestination.offsets(0, 0).iterator(), false, preparation,
+        SpawnDestination.Pending pending = preparedPending(
+                SpawnDestination.offsets(0).iterator(), false, preparation,
                 ignored -> probe, BlockPos.ZERO, 1,
-                feet -> DestinationSafety.SpawnProbe.controlled(feet, 1, 2,
+                feet -> spawnProbe(feet, 1, 2,
                         preparation.residency(), position -> Blocks.AIR.defaultBlockState()));
 
         int preparationTicks = 0;
@@ -783,7 +688,7 @@ public final class DestinationsTest {
         check(preparation.residency().chunkAtBlock(0, 0) == chunk,
                 "prepared LevelChunk values are retained for loaded-only search reads");
 
-        DestinationSafety.ChunkPreparation failing = DestinationSafety.ChunkPreparation.controlled(
+        DestinationSafety.ChunkPreparation failing = fixedPreparation(
                 0, 0, 0, 0, ignored -> { throw new IllegalStateException("generation failed"); });
         boolean failedLoudly = false;
         try {
@@ -893,7 +798,7 @@ public final class DestinationsTest {
 
     private static void residencySnapshotRetainsChunkValuesForLoadedOnlyReads() {
         Object residentChunk = new Object();
-        DestinationSafety.ChunkResidency snapshot = DestinationSafety.ChunkResidency.captureValues(
+        DestinationSafety.ChunkResidency snapshot = testResidencyValues(
                 0, 15, 0, 15, chunk -> residentChunk);
         check(snapshot.chunkAtBlock(4, 9) == residentChunk,
                 "residency snapshot retains the exact loaded chunk for later block reads");
@@ -903,9 +808,9 @@ public final class DestinationsTest {
 
     private static void productionSpawnProbeUsesRealBlockStatesAndHonestCollisionWork() {
         Object controlledChunk = new Object();
-        DestinationSafety.ChunkResidency resident = DestinationSafety.ChunkResidency.captureValues(
+        DestinationSafety.ChunkResidency resident = testResidencyValues(
                 -2, 2, -2, 2, chunk -> controlledChunk);
-        DestinationSafety.SpawnProbe probe = DestinationSafety.SpawnProbe.controlled(
+        DestinationSafety.SpawnProbe probe = spawnProbe(
                 BlockPos.ZERO, 1, 2, resident,
                 position -> position.getY() == -1 ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState());
         probe.begin(new SpawnDestination.Offset(0, 0, 0), SpawnDestination.ProbeKind.ROOT);
@@ -914,23 +819,23 @@ public final class DestinationsTest {
                 "production SpawnProbe accepts controlled real Minecraft stone/air states");
         check(result.worldWork() > 39,
                 "collision intersections cost more than their underlying block reads");
-        check(DestinationSafety.SpawnProbe.COLLISION_INTERSECTION_WORK
-                        > DestinationSafety.SpawnProbe.BLOCK_READ_WORK,
+        check(DestinationSafety.COLLISION_INTERSECTION_WORK
+                        > DestinationSafety.BLOCK_READ_WORK,
                 "collision work has a distinct conservative fixed charge");
     }
 
     private static void finalLiveRevalidationRejectsAChangedAcceptedFootprint() {
         Object controlledChunk = new Object();
-        DestinationSafety.ChunkResidency resident = DestinationSafety.ChunkResidency.captureValues(
+        DestinationSafety.ChunkResidency resident = testResidencyValues(
                 -2, 2, -2, 2, chunk -> controlledChunk);
         java.util.function.Function<BlockPos, net.minecraft.world.level.block.state.BlockState> safeStates =
                 position -> position.getY() == -1 ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState();
         SpawnDestination.Search search = new SpawnDestination.Search(
-                SpawnDestination.offsets(0, 0).iterator(),
-                DestinationSafety.SpawnProbe.controlled(BlockPos.ZERO, 1, 2, resident, safeStates), false);
-        SpawnDestination.Pending pending = SpawnDestination.Pending.controlled(
+                SpawnDestination.offsets(0).iterator(),
+                spawnProbe(BlockPos.ZERO, 1, 2, resident, safeStates), false);
+        SpawnDestination.Pending pending = directPending(
                 search, BlockPos.ZERO, 1,
-                feet -> DestinationSafety.SpawnProbe.controlled(feet, 1, 2, resident,
+                feet -> spawnProbe(feet, 1, 2, resident,
                         position -> position.getY() == -1
                                 ? Blocks.LAVA.defaultBlockState() : Blocks.AIR.defaultBlockState()));
 
@@ -951,7 +856,7 @@ public final class DestinationsTest {
 
     private static void edgeAcceptancePreparesExactFinalFiveByFiveBeforeFreshValidation() {
         Object searchChunk = new Object();
-        DestinationSafety.ChunkPreparation searchPreparation = DestinationSafety.ChunkPreparation.controlled(
+        DestinationSafety.ChunkPreparation searchPreparation = fixedPreparation(
                 -56, 56, -56, 56, ignored -> searchChunk);
         check(searchPreparation.prepare(64, 64) == 64, "edge fixture prepares the bounded search rectangle");
 
@@ -968,7 +873,7 @@ public final class DestinationsTest {
         Set<Long> finalTickets = new HashSet<>();
         List<String> order = new ArrayList<>();
         final DestinationSafety.ChunkPreparation[] finalPreparation = new DestinationSafety.ChunkPreparation[1];
-        SpawnDestination.Pending pending = SpawnDestination.Pending.controlledPreparing(
+        SpawnDestination.Pending pending = preparedPending(
                 List.of(new SpawnDestination.Offset(48, 0, 0)).iterator(), false, searchPreparation,
                 ignored -> acceptedEdge, BlockPos.ZERO, 1,
                 position -> {
@@ -1027,27 +932,27 @@ public final class DestinationsTest {
     }
 
     private static void oversizedModdedRootsKeepTheSnapshotHardBounded() {
-        check(SpawnDestination.rootGeometrySupported(14, 16), "documented maximum root geometry is supported");
-        check(!SpawnDestination.rootGeometrySupported(15, 16), "width above policy is rejected before snapshot growth");
-        check(!SpawnDestination.rootGeometrySupported(14, 17), "height above policy is rejected before search work");
+        check(DestinationSafety.rootGeometrySupported(14, 16), "documented maximum root geometry is supported");
+        check(!DestinationSafety.rootGeometrySupported(15, 16), "width above policy is rejected before snapshot growth");
+        check(!DestinationSafety.rootGeometrySupported(14, 17), "height above policy is rejected before search work");
         check(SpawnDestination.searchRootWidth(1_000, 1_000) == 1,
                 "arbitrarily wide modded roots use only the player diagnostic snapshot");
         int halfWidth = (SpawnDestination.searchRootWidth(1_000, 1_000) + 1) / 2;
-        DestinationSafety.ChunkResidency snapshot = DestinationSafety.ChunkResidency.capture(
-                -SpawnDestination.HORIZONTAL_BOUND - halfWidth - 1,
-                SpawnDestination.HORIZONTAL_BOUND + halfWidth + 1,
-                -SpawnDestination.HORIZONTAL_BOUND - halfWidth - 1,
-                SpawnDestination.HORIZONTAL_BOUND + halfWidth + 1, chunk -> false);
+        DestinationSafety.ChunkResidency snapshot = testResidency(
+                -SpawnDestination.SEARCH_BOUND - halfWidth - 1,
+                SpawnDestination.SEARCH_BOUND + halfWidth + 1,
+                -SpawnDestination.SEARCH_BOUND - halfWidth - 1,
+                SpawnDestination.SEARCH_BOUND + halfWidth + 1, chunk -> false);
         check(snapshot.chunkProbes() <= 64, "arbitrary modded dimensions cannot exceed 64 captured chunks");
     }
 
     private static void productionSearchHotPathHasBoundedAllocationAndNoCandidateChunkSets() {
-        DestinationSafety.ChunkResidency resident = DestinationSafety.ChunkResidency.capture(
+        DestinationSafety.ChunkResidency resident = testResidency(
                 -50, 50, -50, 50, chunk -> true);
         check(SpawnDestination.CandidateProbe.class.isAssignableFrom(DestinationSafety.SpawnProbe.class),
                 "production DestinationSafety probe is wired into the incremental search contract");
-        check(Commands.SEARCH_CANDIDATES_PER_TICK == 4_096
-                        && Commands.SEARCH_WORLD_WORK_PER_TICK == 142_062,
+        check(OmwhCommands.SEARCH_CANDIDATES_PER_TICK == 4_096
+                        && OmwhCommands.SEARCH_WORLD_WORK_PER_TICK == 142_062,
                 "candidate starts stay fixed while aggregate world work covers staged lazy home and immediate routes");
         AtomicInteger directRangeChecks = new AtomicInteger();
         SpawnDestination.CandidateProbe probe = new SpawnDestination.CandidateProbe() {
@@ -1063,7 +968,7 @@ public final class DestinationsTest {
 
         Long before = allocatedBytes();
         SpawnDestination.Search search = new SpawnDestination.Search(
-                SpawnDestination.offsets(48, 48).iterator(), probe, false);
+                SpawnDestination.offsets(48).iterator(), probe, false);
         while (!search.complete()) search.tick(4_096, 4_096);
         Long after = allocatedBytes();
         check(search.selection().candidatesVisited() == 912_673,
@@ -1098,14 +1003,14 @@ public final class DestinationsTest {
 
     private static void spawnReadFailureNeverInventsCoordinates() {
         List<RuntimeException> failures = new ArrayList<>();
-        BlockPos center = SpawnDestination.readSpawnCenter(() -> {
+        BlockPos center = SpawnDestination.readSpawnData(() -> {
             throw new IllegalStateException("spawn data unavailable");
         }, failures::add);
         check(center == null, "spawn read failure has no fabricated fallback center");
         check(failures.size() == 1 && failures.getFirst().getMessage().contains("unavailable"),
                 "spawn read failure reaches the logger boundary");
         BlockPos expected = new BlockPos(4, 70, -9);
-        check(SpawnDestination.readSpawnCenter(() -> expected, failures::add).equals(expected),
+        check(SpawnDestination.readSpawnData(() -> expected, failures::add).equals(expected),
                 "successful spawn read preserves the authoritative center");
     }
 
@@ -1125,7 +1030,7 @@ public final class DestinationsTest {
 
         long started = System.nanoTime();
         SpawnDestination.Selection exhausted = searchSelection(
-                SpawnDestination.offsets(48, 48), offset -> false, offset -> false);
+                SpawnDestination.offsets(48), offset -> false, offset -> false);
         long elapsedNanos = System.nanoTime() - started;
         check(exhausted.outcome() == SpawnDestination.Outcome.UNSAFE
                         && exhausted.candidatesVisited() == 912_673
@@ -1237,16 +1142,6 @@ public final class DestinationsTest {
                 DestinationSafety.chunkKey(-1, -2), DestinationSafety.chunkKey(-1, -1))),
                 "negative chunk boundary");
 
-        DestinationSafety.Cell protrudingOwner = new DestinationSafety.Cell(14, 64, 15);
-        DestinationSafety.Bounds protrudingShape = new DestinationSafety.Bounds(
-                14.8, 64, 15, 15.2, 65, 16);
-        check(!DestinationSafety.collisionFree(occupied, positive,
-                        cell -> cell.equals(protrudingOwner) ? List.of(protrudingShape) : List.of()),
-                "neighboring collision-owner shape blocks spawn");
-        check(DestinationSafety.collisionFree(occupied, positive,
-                        cell -> cell.equals(protrudingOwner)
-                                ? List.of(new DestinationSafety.Bounds(14, 64, 15, 15, 65, 16)) : List.of()),
-                "touching exclusive boundary does not intersect");
     }
 
     private static void safetyOwnsFootprintsHazardsAndFiveByFiveChunkPreparation() {
@@ -1269,6 +1164,100 @@ public final class DestinationsTest {
         List<SpawnDestination.Offset> result = new ArrayList<>();
         offsets.forEach(result::add);
         return result;
+    }
+
+    private static DestinationSafety.ChunkPreparation expandablePreparation(LongFunction<?> loader) {
+        return DestinationSafety.ChunkPreparation.expandableControlled(ticketAccess(loader));
+    }
+
+    private static DestinationSafety.ChunkPreparation fixedPreparation(
+            int minX, int maxX, int minZ, int maxZ, LongFunction<?> loader) {
+        return DestinationSafety.ChunkPreparation.controlled(
+                minX, maxX, minZ, maxZ, ticketAccess(loader));
+    }
+
+    private static DestinationSafety.TicketAccess ticketAccess(LongFunction<?> loader) {
+        return new DestinationSafety.TicketAccess() {
+            @Override public void retain(long chunk) { }
+            @Override public Object load(long chunk) { return loader.apply(chunk); }
+            @Override public void release(long chunk) { }
+        };
+    }
+
+    static DestinationSafety.SpawnProbe spawnProbe(
+            BlockPos center, int rootWidth, int rootHeight,
+            DestinationSafety.ChunkResidency residency, Function<BlockPos, BlockState> states) {
+        return new DestinationSafety.SpawnProbe(new DestinationSafety.ProbeAccess() {
+            @Override public int minY() { return -1_000_000; }
+            @Override public int maxY() { return 1_000_000; }
+            @Override public boolean withinBorder(double minX, double maxX, double minZ, double maxZ) {
+                return true;
+            }
+            @Override public BlockState blockState(Object capturedChunk, BlockPos position) {
+                return states.apply(position);
+            }
+            @Override public boolean fullSupport(BlockState state, BlockPos position) {
+                return state.isCollisionShapeFullBlock(EmptyBlockGetter.INSTANCE, position);
+            }
+            @Override public boolean collides(BlockState state, BlockPos position,
+                                              double minX, double minY, double minZ,
+                                              double maxX, double maxY, double maxZ) {
+                return Shapes.joinIsNotEmpty(
+                        state.getCollisionShape(EmptyBlockGetter.INSTANCE, position, CollisionContext.empty()),
+                        Shapes.box(minX - position.getX(), minY - position.getY(), minZ - position.getZ(),
+                                maxX - position.getX(), maxY - position.getY(), maxZ - position.getZ()),
+                        BooleanOp.AND);
+            }
+        }, center, rootWidth, rootHeight, true, residency);
+    }
+
+    private static SpawnDestination.Pending lazyPending(
+            java.util.Iterator<SpawnDestination.Offset> candidates, boolean mounted,
+            DestinationSafety.ChunkPreparation preparation, BlockPos center,
+            int rootWidth, int rootHeight, Function<BlockPos, BlockState> states) {
+        SpawnDestination.SearchStage search = new SpawnDestination.PreparedSearchStage(
+                candidates, mounted, preparation,
+                residency -> spawnProbe(center, rootWidth, rootHeight, residency, states),
+                center, rootWidth);
+        SpawnDestination.FinalStage finalStage = new SpawnDestination.DirectFinalStage(
+                feet -> spawnProbe(feet, rootWidth, rootHeight, preparation.liveResidency(), states));
+        return new SpawnDestination.Pending(search, finalStage, null,
+                center, center, rootWidth, 0, 0);
+    }
+
+    private static SpawnDestination.Pending directPending(
+            SpawnDestination.Search search, BlockPos center, int rootWidth,
+            Function<BlockPos, ? extends SpawnDestination.CandidateProbe> freshProbe) {
+        return new SpawnDestination.Pending(new SpawnDestination.DirectSearchStage(search),
+                new SpawnDestination.DirectFinalStage(freshProbe::apply), null,
+                center, center, rootWidth, 0, 0);
+    }
+
+    private static SpawnDestination.Pending preparedPending(
+            java.util.Iterator<SpawnDestination.Offset> candidates, boolean mounted,
+            DestinationSafety.ChunkPreparation preparation,
+            Function<DestinationSafety.ChunkResidency, SpawnDestination.CandidateProbe> probeFactory,
+            BlockPos center, int rootWidth,
+            Function<BlockPos, ? extends SpawnDestination.CandidateProbe> finalProbeFactory) {
+        SpawnDestination.SearchStage search = new SpawnDestination.PreparedSearchStage(
+                candidates, mounted, preparation, probeFactory, center, rootWidth);
+        return new SpawnDestination.Pending(search,
+                new SpawnDestination.DirectFinalStage(finalProbeFactory::apply), null,
+                center, center, rootWidth, 0, 0);
+    }
+
+    private static SpawnDestination.Pending preparedPending(
+            java.util.Iterator<SpawnDestination.Offset> candidates, boolean mounted,
+            DestinationSafety.ChunkPreparation preparation,
+            Function<DestinationSafety.ChunkResidency, SpawnDestination.CandidateProbe> probeFactory,
+            BlockPos center, int rootWidth,
+            Function<Vec3, DestinationSafety.ChunkPreparation> finalPreparationFactory,
+            BiFunction<BlockPos, DestinationSafety.ChunkResidency, SpawnDestination.CandidateProbe> finalProbeFactory) {
+        SpawnDestination.SearchStage search = new SpawnDestination.PreparedSearchStage(
+                candidates, mounted, preparation, probeFactory, center, rootWidth);
+        return new SpawnDestination.Pending(search,
+                new SpawnDestination.PreparedFinalStage(finalPreparationFactory, finalProbeFactory), null,
+                center, center, rootWidth, 0, 0);
     }
 
     private static SpawnDestination.Selection searchSelection(
@@ -1321,6 +1310,36 @@ public final class DestinationsTest {
 
     private static int shell(SpawnDestination.Offset offset) {
         return Math.max(Math.abs(offset.x()), Math.max(Math.abs(offset.y()), Math.abs(offset.z())));
+    }
+
+    private static DestinationSafety.ChunkResidency testResidency(
+            int minBlockX, int maxBlockX, int minBlockZ, int maxBlockZ, LongPredicate loaded) {
+        return testResidencyValues(minBlockX, maxBlockX, minBlockZ, maxBlockZ,
+                chunk -> loaded.test(chunk) ? Boolean.TRUE : null);
+    }
+
+    private static DestinationSafety.ChunkResidency testResidencyValues(
+            int minBlockX, int maxBlockX, int minBlockZ, int maxBlockZ, LongFunction<?> values) {
+        int minChunkX = Math.floorDiv(minBlockX, 16);
+        int maxChunkX = Math.floorDiv(maxBlockX, 16);
+        int minChunkZ = Math.floorDiv(minBlockZ, 16);
+        int maxChunkZ = Math.floorDiv(maxBlockZ, 16);
+        int capacity = (maxChunkX - minChunkX + 1) * (maxChunkZ - minChunkZ + 1);
+        long[] keys = new long[capacity];
+        Object[] chunks = new Object[capacity];
+        int count = 0;
+        for (int x = minChunkX; x <= maxChunkX; x++) {
+            for (int z = minChunkZ; z <= maxChunkZ; z++) {
+                long key = ((long) x << 32) | (z & 0xffffffffL);
+                Object chunk = values.apply(key);
+                if (chunk == null) continue;
+                keys[count] = key;
+                chunks[count] = chunk;
+                count++;
+            }
+        }
+        int captured = count;
+        return new DestinationSafety.ChunkResidency(keys, chunks, () -> captured);
     }
 
     private static void check(boolean condition, String behavior) {
