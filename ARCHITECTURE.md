@@ -29,10 +29,10 @@ omwh/
 │   │   │   │   # dimensions, mounted clearance, and the single uncovered-bed above-bed fallback.
 │   │   │   ├── SpawnDestination.java
 │   │   │   │   # /spawn-only policy: Overworld/Nether/End/modded-dimension routing, vanilla End
-│   │   │   │   # transition behavior, bounded terrain preparation, and resumable deterministic search.
+│   │   │   │   # transition behavior and deterministic search that prepares terrain as candidates need it.
 │   │   │   ├── DestinationSafety.java
-│   │   │   │   # Shared placement owner for bounded chunk preparation, temporary residency tickets,
-│   │   │   │   # retained chunk snapshots, ticket release, build limits, support, hazards, and collision footprints.
+│   │   │   │   # Shared placement owner for expandable retained terrain, destination preparation,
+│   │   │   │   # temporary tickets, ticket release, build limits, support, hazards, and collision footprints.
 │   │   │   └── TeleportService.java
 │   │   │       # Sole entity-mutation owner. Captures UUIDs, exact passenger edges, source validity,
 │   │   │       # and player identities; performs one same- or cross-dimension recursive root

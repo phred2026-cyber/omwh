@@ -34,6 +34,9 @@ public final class DestinationsTest {
         spawnSearchIsLazyDeterministicAndComplete();
         zeroBoundsEmitOnlyTheOrigin();
         incrementalSearchResumesWithinFixedTickBudgets();
+        safeOriginLazilyPreparesOnlyItsCandidateTerrain();
+        laterCandidateLoadsOnlyItsNewBoundaryChunkWithoutRestart();
+        mountedCandidateEnvelopeExpandsRetainedTerrainGeometry();
         coldSpawnPreparationIsExactBoundedAndPrecedesSearch();
         temporaryChunkTicketsOwnResidencyUntilExplicitClose();
         residencySnapshotRetainsChunkValuesForLoadedOnlyReads();
@@ -49,7 +52,7 @@ public final class DestinationsTest {
         spawnFailureDistinguishesOversizedVehicle();
         collisionOwnersIncludeShellAndEveryInvolvedChunk();
         safetyOwnsFootprintsHazardsAndFiveByFiveChunkPreparation();
-        System.out.println("DestinationsTest PASS (30 behavior groups)");
+        System.out.println("DestinationsTest PASS (33 behavior groups)");
     }
 
     private static void homePolicyAllowsOnlyAcceptedRespawnsAndOneBedAlternate() {
@@ -420,6 +423,139 @@ public final class DestinationsTest {
                 .filter(value -> value.startsWith("ROOT:"))
                 .map(DestinationsTest::parseStartedOffset).toList();
         check(rootOrder.equals(expected), "tick resume preserves exact shell/x/y/z order without repeats or skips");
+    }
+
+    private static void safeOriginLazilyPreparesOnlyItsCandidateTerrain() {
+        List<Long> generated = new ArrayList<>();
+        DestinationSafety.ChunkPreparation preparation =
+                DestinationSafety.ChunkPreparation.expandableControlled(key -> {
+                    generated.add(key);
+                    return new Object();
+                });
+        SpawnDestination.Pending pending = SpawnDestination.Pending.controlledLazyPreparing(
+                SpawnDestination.offsets(48, 48).iterator(), false, preparation,
+                BlockPos.ZERO.offset(8, 0, 8), 1, 2,
+                position -> position.getY() == -1
+                        ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState());
+
+        int visits = 0;
+        while (!pending.complete()) {
+            int before = generated.size();
+            SpawnDestination.Tick used = pending.tick(1, 10_000);
+            check(generated.size() - before <= SpawnDestination.PREPARATION_CHUNKS_PER_VISIT,
+                    "candidate terrain generation obeys the two-chunk visit quantum");
+            check(used.candidatesStarted() <= 1, "candidate preparation does not restart the origin");
+            check(++visits < 100, "safe origin completes without broad terrain preparation");
+        }
+
+        check(pending.result().outcome() == SpawnDestination.Outcome.ACCEPT,
+                "safe origin is accepted after its complete terrain envelope is resident");
+        check(generated.equals(List.of(DestinationSafety.chunkKey(0, 0))),
+                "safe origin generates only its exact candidate-required chunk");
+        check(preparation.retainedChunkCount() == 1,
+                "safe origin never performs the former 64-chunk preload");
+    }
+
+    private static void laterCandidateLoadsOnlyItsNewBoundaryChunkWithoutRestart() {
+        List<Long> generated = new ArrayList<>();
+        DestinationSafety.ChunkPreparation preparation =
+                DestinationSafety.ChunkPreparation.expandableControlled(key -> {
+                    generated.add(key);
+                    return new Object();
+                });
+        BlockPos center = new BlockPos(8, 0, 8);
+        List<SpawnDestination.Offset> candidates = List.of(
+                new SpawnDestination.Offset(0, 0, 0),
+                new SpawnDestination.Offset(1, 0, 0),
+                new SpawnDestination.Offset(7, 0, 0));
+        SpawnDestination.Pending pending = SpawnDestination.Pending.controlledLazyPreparing(
+                candidates.iterator(), false, preparation, center, 1, 2,
+                position -> position.getY() == -1 && (position.getX() == 8 || position.getX() == 9)
+                        ? Blocks.LAVA.defaultBlockState()
+                        : position.getY() == -1
+                        ? Blocks.STONE.defaultBlockState() : Blocks.AIR.defaultBlockState());
+
+        int candidateStarts = 0;
+        int visits = 0;
+        while (!pending.complete()) {
+            int before = generated.size();
+            SpawnDestination.Tick used = pending.tick(1, 10_000);
+            candidateStarts += used.candidatesStarted();
+            check(generated.size() - before <= SpawnDestination.PREPARATION_CHUNKS_PER_VISIT,
+                    "boundary expansion loads at most two chunks in one request visit");
+            check(++visits < 100, "later safe candidate completes deterministically");
+        }
+
+        check(candidateStarts == candidates.size(),
+                "terrain preparation resumes the same candidate without skipping or restarting it");
+        check(generated.equals(List.of(
+                        DestinationSafety.chunkKey(0, 0), DestinationSafety.chunkKey(1, 0))),
+                "unsafe candidates inside retained terrain load nothing and the boundary candidate adds one neighbor");
+        check(pending.result().outcome() == SpawnDestination.Outcome.ACCEPT,
+                "the boundary candidate is checked only after its complete envelope is resident");
+    }
+
+    private static void mountedCandidateEnvelopeExpandsRetainedTerrainGeometry() {
+        List<Long> x14Loads = new ArrayList<>();
+        DestinationSafety.ChunkPreparation x14 =
+                DestinationSafety.ChunkPreparation.expandableControlled(key -> {
+                    x14Loads.add(key);
+                    return new Object();
+                });
+        SpawnDestination.Offset origin = new SpawnDestination.Offset(0, 0, 0);
+        x14.requireCandidate(new BlockPos(14, 0, 8), origin, 1);
+        while (!x14.complete()) x14.prepare(2, 2);
+        check(x14Loads.equals(List.of(DestinationSafety.chunkKey(0, 0))),
+                "x=14 exact footprint plus adjacent collision-owner shell ends at x=15 in chunk 0");
+
+        List<Long> x15Loads = new ArrayList<>();
+        DestinationSafety.ChunkPreparation x15 =
+                DestinationSafety.ChunkPreparation.expandableControlled(key -> {
+                    x15Loads.add(key);
+                    return new Object();
+                });
+        x15.requireCandidate(new BlockPos(15, 0, 8), origin, 1);
+        while (!x15.complete()) x15.prepare(2, 2);
+        check(x15Loads.equals(List.of(
+                        DestinationSafety.chunkKey(0, 0), DestinationSafety.chunkKey(1, 0))),
+                "x=15 adjacent collision-owner shell reaches x=16 and requires chunk 1");
+
+        List<Long> generated = new ArrayList<>();
+        DestinationSafety.ChunkPreparation preparation =
+                DestinationSafety.ChunkPreparation.expandableControlled(key -> {
+                    generated.add(key);
+                    return new Object();
+                });
+        BlockPos center = new BlockPos(9, 0, 9);
+        preparation.requireCandidate(center, origin, 1);
+        preparation.prepare(2, 2);
+        check(generated.equals(List.of(DestinationSafety.chunkKey(0, 0))),
+                "player footprint plus the horizontal owner boundary fits one interior chunk");
+
+        preparation.requireCandidate(center, origin, 14);
+        while (!preparation.complete()) preparation.prepare(2, 2);
+        check(new HashSet<>(generated).equals(Set.of(
+                        DestinationSafety.chunkKey(0, 0), DestinationSafety.chunkKey(0, 1),
+                        DestinationSafety.chunkKey(1, 0), DestinationSafety.chunkKey(1, 1))),
+                "maximum mounted footprint expands to every chunk crossed by its safety envelope");
+        check(generated.size() == 4 && preparation.retainedChunkCount() <= 64,
+                "mounted expansion is deduplicated under the overall retained-chunk cap");
+
+        DestinationSafety.ChunkPreparation fullSearch =
+                DestinationSafety.ChunkPreparation.expandableControlled(ignored -> new Object());
+        for (int x = -48; x <= 48; x++) {
+            for (int z = -48; z <= 48; z++) {
+                fullSearch.requireCandidate(BlockPos.ZERO, new SpawnDestination.Offset(x, 0, z), 14);
+            }
+        }
+        while (!fullSearch.complete()) {
+            int before = fullSearch.retainedChunkCount();
+            fullSearch.prepare(SpawnDestination.PREPARATION_CHUNKS_PER_VISIT, 10_000);
+            check(fullSearch.retainedChunkCount() - before <= SpawnDestination.PREPARATION_CHUNKS_PER_VISIT,
+                    "maximum search residency still loads no more than two chunks per request visit");
+        }
+        check(fullSearch.retainedChunkCount() == DestinationSafety.SPAWN_PREPARATION_CHUNK_CAP,
+                "maximum mounted search geometry retains exactly the 64-chunk hard cap");
     }
 
     private static void coldSpawnPreparationIsExactBoundedAndPrecedesSearch() {
@@ -927,20 +1063,16 @@ public final class DestinationsTest {
                 DestinationSafety.chunkKey(-1, -2), DestinationSafety.chunkKey(-1, -1))),
                 "negative chunk boundary");
 
-        Set<Long> loaded = new HashSet<>();
-        List<Long> loadCalls = new ArrayList<>();
         DestinationSafety.Cell protrudingOwner = new DestinationSafety.Cell(14, 64, 15);
         DestinationSafety.Bounds protrudingShape = new DestinationSafety.Bounds(
                 14.8, 64, 15, 15.2, 65, 16);
-        check(!DestinationSafety.preloadAndCheckCollisions(occupied, loaded, loadCalls::add,
+        check(!DestinationSafety.collisionFree(occupied, positive,
                         cell -> cell.equals(protrudingOwner) ? List.of(protrudingShape) : List.of()),
-                "production-connected neighboring shape blocks spawn");
-        check(DestinationSafety.preloadAndCheckCollisions(occupied, loaded, loadCalls::add,
+                "neighboring collision-owner shape blocks spawn");
+        check(DestinationSafety.collisionFree(occupied, positive,
                         cell -> cell.equals(protrudingOwner)
                                 ? List.of(new DestinationSafety.Bounds(14, 64, 15, 15, 65, 16)) : List.of()),
                 "touching exclusive boundary does not intersect");
-        check(new HashSet<>(loadCalls).equals(positiveChunks), "production-connected owner chunks loaded");
-        check(loadCalls.size() == positiveChunks.size(), "one search-local load per owner chunk");
     }
 
     private static void safetyOwnsFootprintsHazardsAndFiveByFiveChunkPreparation() {

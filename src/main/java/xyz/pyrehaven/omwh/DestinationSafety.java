@@ -26,7 +26,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
 import java.util.function.Function;
-import java.util.function.LongConsumer;
+import java.util.function.IntSupplier;
 import java.util.function.LongFunction;
 import java.util.function.LongPredicate;
 
@@ -96,6 +96,8 @@ public final class DestinationSafety {
         private final int depth;
         private final Object[] chunks;
         private final int chunkProbes;
+        private final long[] sparseKeys;
+        private final IntSupplier sparseCount;
 
         private ChunkResidency(int minChunkX, int minChunkZ, int width, int depth,
                                Object[] chunks, int chunkProbes) {
@@ -105,6 +107,19 @@ public final class DestinationSafety {
             this.depth = depth;
             this.chunks = chunks;
             this.chunkProbes = chunkProbes;
+            this.sparseKeys = null;
+            this.sparseCount = null;
+        }
+
+        private ChunkResidency(long[] sparseKeys, Object[] chunks, IntSupplier sparseCount) {
+            this.minChunkX = 0;
+            this.minChunkZ = 0;
+            this.width = 0;
+            this.depth = 0;
+            this.chunks = chunks;
+            this.chunkProbes = 0;
+            this.sparseKeys = sparseKeys;
+            this.sparseCount = sparseCount;
         }
 
         static ChunkResidency capture(int minBlockX, int maxBlockX, int minBlockZ, int maxBlockZ,
@@ -134,13 +149,21 @@ public final class DestinationSafety {
                     chunks, probes);
         }
 
-        int chunkProbes() { return chunkProbes; }
+        int chunkProbes() { return sparseCount == null ? chunkProbes : sparseCount.getAsInt(); }
 
         boolean coversBlockRange(int minBlockX, int maxBlockX, int minBlockZ, int maxBlockZ) {
             int firstX = chunkCoordinate(minBlockX);
             int lastX = chunkCoordinate(maxBlockX);
             int firstZ = chunkCoordinate(minBlockZ);
             int lastZ = chunkCoordinate(maxBlockZ);
+            if (sparseCount != null) {
+                for (int x = firstX; x <= lastX; x++) {
+                    for (int z = firstZ; z <= lastZ; z++) {
+                        if (chunkByKey(chunkKey(x, z)) == null) return false;
+                    }
+                }
+                return true;
+            }
             if (firstX < minChunkX || lastX >= minChunkX + width
                     || firstZ < minChunkZ || lastZ >= minChunkZ + depth) return false;
             for (int x = firstX; x <= lastX; x++) {
@@ -154,9 +177,18 @@ public final class DestinationSafety {
         Object chunkAtBlock(int blockX, int blockZ) {
             int chunkX = chunkCoordinate(blockX);
             int chunkZ = chunkCoordinate(blockZ);
+            if (sparseCount != null) return chunkByKey(chunkKey(chunkX, chunkZ));
             if (chunkX < minChunkX || chunkX >= minChunkX + width
                     || chunkZ < minChunkZ || chunkZ >= minChunkZ + depth) return null;
             return chunks[(chunkX - minChunkX) * depth + chunkZ - minChunkZ];
+        }
+
+        private Object chunkByKey(long key) {
+            int count = sparseCount.getAsInt();
+            for (int index = 0; index < count; index++) {
+                if (sparseKeys[index] == key) return chunks[index];
+            }
+            return null;
         }
     }
     interface TicketAccess {
@@ -195,32 +227,26 @@ public final class DestinationSafety {
     }
 
     static final class ChunkPreparation implements AutoCloseable {
-        private final int minChunkX;
-        private final int minChunkZ;
-        private final int width;
-        private final int depth;
-        private final Object[] chunks;
-        private final boolean[] retained;
+        private final long[] keys = new long[SPAWN_PREPARATION_CHUNK_CAP];
+        private final Object[] chunks = new Object[SPAWN_PREPARATION_CHUNK_CAP];
+        private final boolean[] retained = new boolean[SPAWN_PREPARATION_CHUNK_CAP];
         private final TicketAccess tickets;
+        private final boolean expandable;
+        private int required;
         private int prepared;
         private boolean closing;
         private boolean closed;
 
         private ChunkPreparation(int minBlockX, int maxBlockX, int minBlockZ, int maxBlockZ,
                                  TicketAccess tickets) {
-            minChunkX = chunkCoordinate(minBlockX);
-            minChunkZ = chunkCoordinate(minBlockZ);
-            int maxChunkX = chunkCoordinate(maxBlockX);
-            int maxChunkZ = chunkCoordinate(maxBlockZ);
-            width = maxChunkX - minChunkX + 1;
-            depth = maxChunkZ - minChunkZ + 1;
-            int chunkCount = Math.multiplyExact(width, depth);
-            if (chunkCount > SPAWN_PREPARATION_CHUNK_CAP) {
-                throw new IllegalArgumentException("spawn preparation exceeds the 64-chunk bound");
-            }
-            chunks = new Object[chunkCount];
-            retained = new boolean[chunkCount];
             this.tickets = tickets;
+            this.expandable = false;
+            requireBlockRange(minBlockX, maxBlockX, minBlockZ, maxBlockZ);
+        }
+
+        private ChunkPreparation(TicketAccess tickets) {
+            this.tickets = tickets;
+            this.expandable = true;
         }
 
         static ChunkPreparation controlled(int minBlockX, int maxBlockX, int minBlockZ, int maxBlockZ,
@@ -237,10 +263,26 @@ public final class DestinationSafety {
             return new ChunkPreparation(minBlockX, maxBlockX, minBlockZ, maxBlockZ, tickets);
         }
 
+        static ChunkPreparation expandableControlled(LongFunction<?> loader) {
+            return new ChunkPreparation(new TicketAccess() {
+                @Override public void retain(long chunk) { }
+                @Override public Object load(long chunk) { return loader.apply(chunk); }
+                @Override public void release(long chunk) { }
+            });
+        }
+
+        static ChunkPreparation expandableControlled(TicketAccess tickets) {
+            return new ChunkPreparation(tickets);
+        }
+
         static ChunkPreparation forLevel(ServerLevel level, int minBlockX, int maxBlockX,
                                          int minBlockZ, int maxBlockZ) {
             return new ChunkPreparation(minBlockX, maxBlockX, minBlockZ, maxBlockZ,
                     new MinecraftTicketAccess(level));
+        }
+
+        static ChunkPreparation expandableForLevel(ServerLevel level) {
+            return new ChunkPreparation(new MinecraftTicketAccess(level));
         }
 
         static ChunkPreparation forDestination(ServerLevel level, Vec3 position) {
@@ -255,10 +297,8 @@ public final class DestinationSafety {
             if (chunkBudget <= 0 || worldWorkBudget <= 0) return 0;
             int loaded = 0;
             int allowed = Math.min(chunkBudget, worldWorkBudget);
-            while (prepared < chunks.length && loaded < allowed) {
-                int xOffset = prepared / depth;
-                int zOffset = prepared % depth;
-                long key = chunkKey(minChunkX + xOffset, minChunkZ + zOffset);
+            while (prepared < required && loaded < allowed) {
+                long key = keys[prepared];
                 Object chunk;
                 try {
                     tickets.retain(key);
@@ -279,18 +319,69 @@ public final class DestinationSafety {
             return loaded;
         }
 
-        boolean complete() { return prepared == chunks.length; }
+        boolean complete() { return prepared == required; }
+
+        boolean expandable() { return expandable; }
+
+        void requireCandidate(BlockPos center, SpawnDestination.Offset offset, int width) {
+            int feetX = center.getX() + offset.x();
+            int feetZ = center.getZ() + offset.z();
+            double centerOffset = width % 2 == 0 ? 0.0 : 0.5;
+            double half = width / 2.0;
+            int minX = floor(feetX + centerOffset - half) - 1;
+            int maxX = floor(Math.nextDown(feetX + centerOffset + half)) + 1;
+            int minZ = floor(feetZ + centerOffset - half) - 1;
+            int maxZ = floor(Math.nextDown(feetZ + centerOffset + half)) + 1;
+            requireBlockRange(minX, maxX, minZ, maxZ);
+        }
+
+        boolean candidateReady(BlockPos center, SpawnDestination.Offset offset, int width) {
+            int feetX = center.getX() + offset.x();
+            int feetZ = center.getZ() + offset.z();
+            double centerOffset = width % 2 == 0 ? 0.0 : 0.5;
+            double half = width / 2.0;
+            return liveResidency().coversBlockRange(
+                    floor(feetX + centerOffset - half) - 1,
+                    floor(Math.nextDown(feetX + centerOffset + half)) + 1,
+                    floor(feetZ + centerOffset - half) - 1,
+                    floor(Math.nextDown(feetZ + centerOffset + half)) + 1);
+        }
+
+        private void requireBlockRange(int minBlockX, int maxBlockX, int minBlockZ, int maxBlockZ) {
+            if (closing) throw new IllegalStateException("terrain preparation is closing");
+            for (int x = chunkCoordinate(minBlockX); x <= chunkCoordinate(maxBlockX); x++) {
+                for (int z = chunkCoordinate(minBlockZ); z <= chunkCoordinate(maxBlockZ); z++) {
+                    long key = chunkKey(x, z);
+                    if (indexOf(key) >= 0) continue;
+                    if (required == keys.length) {
+                        throw new IllegalStateException("spawn preparation exceeds the 64-chunk bound");
+                    }
+                    keys[required++] = key;
+                }
+            }
+        }
+
+        private int indexOf(long key) {
+            for (int index = 0; index < required; index++) if (keys[index] == key) return index;
+            return -1;
+        }
 
         ChunkResidency residency() {
             if (closing) throw new IllegalStateException("terrain preparation is closing");
             if (!complete()) throw new IllegalStateException("terrain preparation is incomplete");
-            return new ChunkResidency(minChunkX, minChunkZ, width, depth,
-                    chunks.clone(), chunks.length);
+            return liveResidency();
         }
+
+        ChunkResidency liveResidency() {
+            if (closing) throw new IllegalStateException("terrain preparation is closing");
+            return new ChunkResidency(keys, chunks, () -> prepared);
+        }
+
+        int retainedChunkCount() { return prepared; }
 
         int closeWork() {
             int work = 0;
-            for (boolean owned : retained) if (owned) work++;
+            for (int index = 0; index < required; index++) if (retained[index]) work++;
             return work;
         }
 
@@ -299,11 +390,9 @@ public final class DestinationSafety {
             if (closed) return;
             closing = true;
             RuntimeException failure = null;
-            for (int index = 0; index < retained.length; index++) {
+            for (int index = 0; index < required; index++) {
                 if (!retained[index]) continue;
-                int xOffset = index / depth;
-                int zOffset = index % depth;
-                long key = chunkKey(minChunkX + xOffset, minChunkZ + zOffset);
+                long key = keys[index];
                 try {
                     tickets.release(key);
                     retained[index] = false;
@@ -595,11 +684,6 @@ public final class DestinationSafety {
         return Set.copyOf(chunks);
     }
 
-    static void preloadInvolvedChunks(CellRange cells, Set<Long> loadedChunks, LongConsumer loader) {
-        for (long chunk : involvedChunks(cells)) {
-            if (loadedChunks.add(chunk)) loader.accept(chunk);
-        }
-    }
 
     static boolean allChunksLoaded(CellRange cells, LongPredicate loaded) {
         for (long chunk : involvedChunks(cells)) {
@@ -622,13 +706,6 @@ public final class DestinationSafety {
         return true;
     }
 
-    static boolean preloadAndCheckCollisions(Bounds occupied, Set<Long> loadedChunks,
-                                             LongConsumer loader,
-                                             Function<Cell, List<Bounds>> collisionShapes) {
-        CellRange owners = collisionOwnerCells(occupied);
-        preloadInvolvedChunks(owners, loadedChunks, loader);
-        return collisionFree(occupied, owners, collisionShapes);
-    }
 
     static boolean loadedAndCollisionFree(Bounds occupied, LongPredicate loaded,
                                           Function<Cell, List<Bounds>> collisionShapes) {

@@ -53,6 +53,49 @@ public final class SpawnDestination {
         ProbeStep step(int availableWorldWork);
     }
 
+    private static final class PreparingCandidateProbe implements CandidateProbe {
+        private final DestinationSafety.ChunkPreparation preparation;
+        private final CandidateProbe delegate;
+        private final BlockPos center;
+        private final int rootWidth;
+        private Offset active;
+        private ProbeKind kind;
+        private boolean delegateStarted;
+
+        private PreparingCandidateProbe(DestinationSafety.ChunkPreparation preparation,
+                                        CandidateProbe delegate, BlockPos center, int rootWidth) {
+            this.preparation = preparation;
+            this.delegate = delegate;
+            this.center = center;
+            this.rootWidth = rootWidth;
+        }
+
+        @Override
+        public void begin(Offset offset, ProbeKind kind) {
+            this.active = offset;
+            this.kind = kind;
+            this.delegateStarted = false;
+            preparation.requireCandidate(center, offset, kind == ProbeKind.ROOT ? rootWidth : 1);
+        }
+
+        @Override
+        public ProbeStep step(int availableWorldWork) {
+            int prepared = preparation.prepare(PREPARATION_CHUNKS_PER_VISIT, availableWorldWork);
+            int width = kind == ProbeKind.ROOT ? rootWidth : 1;
+            if (!preparation.candidateReady(center, active, width)) {
+                return new ProbeStep(ProbeOutcome.INCOMPLETE, prepared);
+            }
+            if (!delegateStarted) {
+                delegate.begin(active, kind);
+                delegateStarted = true;
+            }
+            int remaining = availableWorldWork - prepared;
+            if (remaining <= 0) return new ProbeStep(ProbeOutcome.INCOMPLETE, prepared);
+            ProbeStep checked = delegate.step(remaining);
+            return new ProbeStep(checked.outcome(), prepared + checked.worldWork());
+        }
+    }
+
     static final class Search {
         private final Iterator<Offset> candidates;
         private final CandidateProbe probe;
@@ -184,12 +227,18 @@ public final class SpawnDestination {
 
         Tick tick(int candidateBudget, int worldWorkBudget) {
             if (result != null) throw new IllegalStateException("pending spawn is already complete");
-            if (preparation != null && !preparation.complete()) {
+            if (preparation != null && !preparation.expandable() && !preparation.complete()) {
                 int prepared = preparation.prepare(PREPARATION_CHUNKS_PER_VISIT, worldWorkBudget);
                 return new Tick(0, prepared);
             }
             if (search == null) {
-                search = new Search(candidates, preparedProbe.apply(preparation.residency()), mounted);
+                DestinationSafety.ChunkResidency residency = preparation.expandable()
+                        ? preparation.liveResidency() : preparation.residency();
+                CandidateProbe probe = preparedProbe.apply(residency);
+                if (preparation.expandable()) {
+                    probe = new PreparingCandidateProbe(preparation, probe, center, rootWidth);
+                }
+                search = new Search(candidates, probe, mounted);
             }
             if (!search.complete()) {
                 Tick used = search.tick(candidateBudget, worldWorkBudget);
@@ -261,6 +310,18 @@ public final class SpawnDestination {
             return new Pending(candidates, mounted, preparation, preparedProbe,
                     null, center, center, rootWidth, 0, 0,
                     finalPreparationFactory, finalProbeFactory);
+        }
+
+        static Pending controlledLazyPreparing(Iterator<Offset> candidates, boolean mounted,
+                                               DestinationSafety.ChunkPreparation preparation,
+                                               BlockPos center, int rootWidth, int rootHeight,
+                                               Function<BlockPos, net.minecraft.world.level.block.state.BlockState> states) {
+            return new Pending(candidates, mounted, preparation,
+                    residency -> DestinationSafety.SpawnProbe.controlled(
+                            center, rootWidth, rootHeight, residency, states),
+                    null, center, center, rootWidth, 0, 0, null,
+                    (feet, ignored) -> DestinationSafety.SpawnProbe.controlled(
+                            feet, rootWidth, rootHeight, preparation.liveResidency(), states));
         }
 
         int closeWork() {
@@ -421,18 +482,13 @@ public final class SpawnDestination {
         boolean rootGeometrySupported = rootGeometrySupported(rootWidth, rootHeight);
         int residencyWidth = searchRootWidth(rootWidth, rootHeight);
         BlockPos center = anchor;
-        int halfWidth = (residencyWidth + 1) / 2;
-        DestinationSafety.ChunkPreparation preparation = DestinationSafety.ChunkPreparation.forLevel(
-                level,
-                center.getX() - HORIZONTAL_BOUND - halfWidth - 1,
-                center.getX() + HORIZONTAL_BOUND + halfWidth + 1,
-                center.getZ() - HORIZONTAL_BOUND - halfWidth - 1,
-                center.getZ() + HORIZONTAL_BOUND + halfWidth + 1);
+        DestinationSafety.ChunkPreparation preparation =
+                DestinationSafety.ChunkPreparation.expandableForLevel(level);
         return new Plan(null, new Pending(offsets(HORIZONTAL_BOUND, VERTICAL_BOUND).iterator(),
                 root != player, preparation,
                 residency -> new DestinationSafety.SpawnProbe(
                         level, center, rootWidth, rootHeight, rootGeometrySupported, residency),
-                level, center, anchor, rootWidth, root.getYRot(), root.getXRot(),
+                level, center, anchor, residencyWidth, root.getYRot(), root.getXRot(),
                 position -> DestinationSafety.ChunkPreparation.forDestination(level, position),
                 (feet, residency) -> new DestinationSafety.SpawnProbe(
                         level, feet, rootWidth, rootHeight, true, residency)));
