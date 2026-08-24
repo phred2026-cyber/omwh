@@ -1,84 +1,64 @@
-# OMWH Structure
+# OMWH architecture
 
-This is the authoritative annotated ownership tree for OMWH 1.2.0. It shows where each source-controlled file belongs and which component owns each part of the mod.
-
-`/home` and `/spawn` differ only in destination policy. `Commands`, `Cooldowns`,
-`DestinationSafety`, and `TeleportService` are their shared owners for command flow, cooldown state,
-placement safety, and teleport mutation.
+OMWH is a small server-side Fabric mod. Production behavior stays in one Java package so ownership is visible without an extra service or framework layer.
 
 ```text
-omwh/
-├── src/
-│   ├── main/
-│   │   ├── java/xyz/pyrehaven/omwh/
-│   │   │   ├── Omwh.java
-│   │   │   │   # Fabric entrypoint and composition root. Loads config, constructs the owners below,
-│   │   │   │   # and registers them for dedicated and integrated servers. No gameplay lives here.
-│   │   │   ├── OmwhConfig.java
-│   │   │   │   # Sole owner of config/omwh.json: command names, messages, effects, cooldowns,
-│   │   │   │   # defaults, loading, creation, and validation.
-│   │   │   ├── Commands.java
-│   │   │   │   # Registers the configured /home and /spawn names and owns their shared
-│   │   │   │   # cooldown → destination → teleport → message/effect flow, including pending
-│   │   │   │   # /spawn lifecycles and cancellation cleanup under one server-wide tick budget.
-│   │   │   ├── Cooldowns.java
-│   │   │   │   # Sole owner of regular, PvP, damage, and join cooldown state plus the Fabric
-│   │   │   │   # callbacks that update it. Commands receive one blocking result from this file.
-│   │   │   ├── HomeDestination.java
-│   │   │   │   # /home-only policy: vanilla saved-respawn admission and placement across allowed
-│   │   │   │   # dimensions, mounted clearance, and the single uncovered-bed above-bed fallback.
-│   │   │   ├── SpawnDestination.java
-│   │   │   │   # /spawn-only policy: Overworld/Nether/End/modded-dimension routing, vanilla End
-│   │   │   │   # transition behavior and deterministic search that prepares terrain as candidates need it.
-│   │   │   ├── DestinationSafety.java
-│   │   │   │   # Shared placement owner for expandable retained terrain, destination preparation,
-│   │   │   │   # temporary tickets, ticket release, build limits, support, hazards, and collision footprints.
-│   │   │   └── TeleportService.java
-│   │   │       # Sole entity-mutation owner. Captures UUIDs, exact passenger edges, source validity,
-│   │   │       # and player identities; performs one same- or cross-dimension recursive root
-│   │   │       # teleport; then reconciles the complete returned tree before reporting success.
-│   │   └── resources/
-│   │       ├── fabric.mod.json
-│   │       │   # Fabric metadata, dependencies, version, icon, and Omwh entrypoint.
-│   │       └── assets/omwh/icon.png
-│   │           # Packaged OMWH icon. No mixin or access-widener file without a feature that needs it.
-│   └── test/
-│       └── java/xyz/pyrehaven/omwh/
-│           ├── ConfigTest.java
-│           │   # Config loading, defaults, validation, malformed files, and round trips.
-│           ├── CommandsAndCooldownsTest.java
-│           │   # Both commands, shared flow, messages, effects, and all cooldown rules.
-│           ├── DestinationsTest.java
-│           │   # Home, spawn, safety checks, mounted placement, and End behavior.
-│           └── TeleportServiceTest.java
-│               # Vehicle/passenger movement, failed preparation, and attachment preservation.
-├── .github/workflows/ci.yml
-│   # Runs the canonical Gradle build and regression suites on pushes and pull requests.
-├── ARCHITECTURE.md
-│   # This authoritative ownership tree. Bug and verification checks compare code placement against it.
-├── CONFIGURATION.md
-│   # Complete server-owner reference for config fields, defaults, messages, and file handling.
-├── FEATURES.md
-│   # Detailed technical behavior contract for the current implementation.
-├── README.md
-│   # Installation, commands, concise configuration summary, and gameplay behavior.
-├── CHANGELOG.md
-├── LICENSE
-├── .gitignore
-│   # Keeps Gradle output, IDE state, and local runtime files out of source.
-├── build.gradle
-│   # Fabric Loom build and all verification tasks.
-├── gradle.properties
-│   # Minecraft, Fabric, Java, and mod versions plus the preserved com.omwh Maven coordinate.
-├── settings.gradle
-├── gradlew
-└── gradle/
-    ├── minecraft/
-    │   ├── 26.2-custom.json
-    │   │   # Loom-compatible Minecraft 26.2 metadata used by the build.
-    │   └── identity-official-26.2.jar
-    │       # Pinned official-name mapping input used by the build.
-    └── wrapper/
-        ├── gradle-wrapper.jar
-        └── gradle-wrapper.properties
+.
+├── .github/workflows/ci.yml         # Canonical CI build and regression gate
+├── .gitignore                       # Generated and local-file exclusions
+├── ARCHITECTURE.md                  # Contributor map and ownership notes
+├── BEHAVIOR.md                      # Player and server-owner contract
+├── CHANGELOG.md                     # Versioned player-facing changes
+├── CONFIGURATION.md                 # Persisted configuration contract
+├── LICENSE                          # CC0-1.0 legal text
+├── README.md                        # Installation and command overview
+├── build.gradle                     # Build plus canonical JavaExec regression tasks
+├── gradle.properties                # Project and dependency versions
+├── gradlew                          # Reproducible Unix Gradle launcher
+├── settings.gradle                  # Gradle project identity
+├── gradle/
+│   ├── minecraft/
+│   │   ├── 26.2-custom.json         # Custom target-version metadata consumed by Loom
+│   │   └── identity-official-26.2.jar # Pinned identity mapping input
+│   └── wrapper/
+│       ├── gradle-wrapper.jar        # Reproducible wrapper bootstrap
+│       └── gradle-wrapper.properties # Wrapper distribution and checksum
+└── src/
+    ├── main/
+    │   ├── java/xyz/pyrehaven/omwh/
+    │   │   ├── Omwh.java             # Fabric entrypoint and event registration
+    │   │   ├── OmwhConfig.java       # JSON loading, defaults, and validation
+    │   │   ├── OmwhCommands.java     # Command admission, pending scheduler, feedback, effects
+    │   │   ├── Cooldowns.java        # Cooldown timestamps and admission results
+    │   │   ├── HomeDestination.java  # Saved-home policy and Minecraft adapter
+    │   │   ├── SpawnDestination.java # Dimension routing and spawn search state machine
+    │   │   ├── DestinationSafety.java # Terrain ownership, geometry, probes, and tickets
+    │   │   └── TeleportService.java  # Root/passenger lifecycle and sole movement owner
+    │   └── resources/
+    │       ├── fabric.mod.json        # Fabric metadata and runtime requirements
+    │       └── assets/omwh/icon.png   # Packaged icon
+    └── test/java/xyz/pyrehaven/omwh/
+        ├── ConfigTest.java            # Parsing, defaults, and persisted validation
+        ├── CommandsAndCooldownsTest.java # Commands, events, scheduling, cleanup, feedback
+        ├── DestinationsTest.java      # Home/spawn policy, terrain, probes, and work bounds
+        └── TeleportServiceTest.java   # Passenger lifecycle, mutation, and reconciliation
 ```
+
+## Dependency direction
+
+`Omwh` wires the runtime. `OmwhCommands` coordinates policy owners but does not duplicate destination or movement logic. `HomeDestination` and `SpawnDestination` produce prepared destinations through `DestinationSafety`. Only `TeleportService` mutates the root/passenger tree. `Cooldowns` and `OmwhConfig` do not depend on command scheduling.
+
+Tests exercise dependency-free policy seams and the production scheduler. A policy seam is useful only when the corresponding Minecraft adapter calls it; narrow fixture collaborators belong in tests rather than production overloads.
+
+## Contributor notes
+
+Minecraft 26.2's saved-respawn and End-arrival algorithms are version-coupled boundaries. Recheck the mapped vanilla reads, order, and side effects on a Minecraft update. Work and chunk constants sit beside the production loops they bound, and traversal/state-machine comments record invariants that are not obvious from local syntax.
+
+Before submitting a change, run:
+
+```bash
+./gradlew clean regressionTest build
+git diff --check
+```
+
+Do not add generated Gradle output to the source tree.
